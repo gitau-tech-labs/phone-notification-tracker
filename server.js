@@ -19,7 +19,7 @@ const pool = new Pool({
 });
 
 // ---------------------------------------------------------------
-// Database initialization
+// Database
 // ---------------------------------------------------------------
 async function initDb() {
   try {
@@ -205,7 +205,9 @@ app.post('/webhook/:token', async (req, res) => {
 
     await pool.query('UPDATE devices SET last_seen_at = NOW() WHERE id = $1', [device.id]);
 
-    broadcast('notification', inserted.rows[0]);
+    const row = inserted.rows[0];
+    row.tags = [];
+    broadcast('notification', row);
     res.status(200).send('OK');
   } catch (err) {
     console.error('Webhook error:', err);
@@ -214,7 +216,7 @@ app.post('/webhook/:token', async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Auth routes
+// Auth
 // ---------------------------------------------------------------
 app.get('/signup', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/');
@@ -382,7 +384,6 @@ app.delete('/api/shelves/:id', requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const check = await pool.query('SELECT id FROM shelves WHERE id = $1 AND user_id = $2', [id, req.session.userId]);
     if (check.rowCount === 0) return res.status(404).json({ error: 'Not found' });
-    // Detach notifications from this shelf (do not delete them)
     await pool.query('UPDATE notifications SET shelf_id = NULL WHERE shelf_id = $1', [id]);
     await pool.query('DELETE FROM shelves WHERE id = $1', [id]);
     broadcast('shelves-changed', {});
@@ -394,12 +395,21 @@ app.delete('/api/shelves/:id', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------
 // Notifications API
 // ---------------------------------------------------------------
+function normaliseNotificationRow(row) {
+  // Ensure tags is always an array (Postgres json_agg may return a string in some driver configs)
+  if (typeof row.tags === 'string') {
+    try { row.tags = JSON.parse(row.tags); } catch (e) { row.tags = []; }
+  }
+  if (!Array.isArray(row.tags)) row.tags = [];
+  return row;
+}
+
 app.get('/api/notifications', requireAuth, async (req, res) => {
   try {
     const { app: appFilter, q, device_id, shelf } = req.query;
     let query = `
       SELECT n.id, n.phone, n.app, n.title, n.body, n.device_id, n.shelf_id, n.notes, n.hash, n.timestamp,
-             COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]') AS tags
+             COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]'::json) AS tags
       FROM notifications n
       LEFT JOIN notification_tags nt ON nt.notification_id = n.id
       LEFT JOIN tags t ON t.id = nt.tag_id
@@ -416,8 +426,11 @@ app.get('/api/notifications', requireAuth, async (req, res) => {
     query += ' GROUP BY n.id ORDER BY n.timestamp DESC LIMIT 300';
 
     const result = await pool.query(query, values);
-    res.json({ notifications: result.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ notifications: result.rows.map(normaliseNotificationRow) });
+  } catch (err) {
+    console.error('notifications list error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/apps', requireAuth, async (req, res) => {
@@ -427,7 +440,6 @@ app.get('/api/apps', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Move notification(s) to a shelf (or null to remove)
 app.patch('/api/notifications/:id', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -454,22 +466,17 @@ app.patch('/api/notifications/:id', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Bulk move
 app.post('/api/notifications/bulk-shelf', requireAuth, async (req, res) => {
   try {
     const { ids, shelf_id } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
     const shelfVal = shelf_id === null ? null : parseInt(shelf_id, 10);
-    await pool.query(
-      'UPDATE notifications SET shelf_id = $1 WHERE id = ANY($2::int[])',
-      [shelfVal, ids]
-    );
+    await pool.query('UPDATE notifications SET shelf_id = $1 WHERE id = ANY($2::int[])', [shelfVal, ids]);
     broadcast('notifications-changed', {});
     res.json({ updated: ids.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Delete notification
 app.delete('/api/notifications/:id', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -488,7 +495,7 @@ app.delete('/api/notifications', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Tags API
+// Tags
 // ---------------------------------------------------------------
 app.get('/api/tags', requireAuth, async (req, res) => {
   try {
@@ -503,29 +510,16 @@ app.post('/api/notifications/:id/tags', requireAuth, async (req, res) => {
     const name = (req.body.name || '').trim().toLowerCase();
     if (!name) return res.status(400).json({ error: 'Tag name required' });
 
-    // Ensure notification belongs to this user's device
-    const owns = await pool.query(
-      `SELECT n.id FROM notifications n
-       JOIN devices d ON d.id = n.device_id
-       WHERE n.id = $1 AND d.user_id = $2`,
-      [id, req.session.userId]
-    );
-    if (owns.rowCount === 0) {
-      // Allow unowned notifications too (single-user case) — fallback check
-      const exists = await pool.query('SELECT id FROM notifications WHERE id = $1', [id]);
-      if (exists.rowCount === 0) return res.status(404).json({ error: 'Notification not found' });
-    }
+    const exists = await pool.query('SELECT id FROM notifications WHERE id = $1', [id]);
+    if (exists.rowCount === 0) return res.status(404).json({ error: 'Notification not found' });
 
-    // Upsert tag
     const tag = await pool.query(
       'INSERT INTO tags (user_id, name) VALUES ($1, $2) ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id, name',
       [req.session.userId, name]
     );
-    const tagId = tag.rows[0].id;
-
     await pool.query(
       'INSERT INTO notification_tags (notification_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [id, tagId]
+      [id, tag.rows[0].id]
     );
     broadcast('notifications-changed', {});
     res.json({ tag: tag.rows[0] });
@@ -543,7 +537,7 @@ app.delete('/api/notifications/:id/tags/:tagId', requireAuth, async (req, res) =
 });
 
 // ---------------------------------------------------------------
-// Export API
+// Export
 // ---------------------------------------------------------------
 app.get('/api/export', requireAuth, async (req, res) => {
   try {
@@ -551,7 +545,7 @@ app.get('/api/export', requireAuth, async (req, res) => {
     let query = `
       SELECT n.id, n.phone, n.app, n.title, n.body, n.device_id, n.shelf_id, n.notes, n.hash, n.timestamp,
              d.name AS device_name,
-             COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]') AS tags
+             COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]'::json) AS tags
       FROM notifications n
       LEFT JOIN devices d ON d.id = n.device_id
       LEFT JOIN notification_tags nt ON nt.notification_id = n.id
@@ -563,18 +557,17 @@ app.get('/api/export', requireAuth, async (req, res) => {
     query += ' GROUP BY n.id, d.name ORDER BY n.timestamp DESC LIMIT 2000';
 
     const result = await pool.query(query, values);
-
-    // Sanity hash of the exported payload (for the demo integrity bit)
-    const payload = JSON.stringify(result.rows);
+    const rows = result.rows.map(normaliseNotificationRow);
+    const payload = JSON.stringify(rows);
     const exportHash = sha256Hex(payload);
 
     const exportObj = {
       exported_at: new Date().toISOString(),
       exported_by: req.session.email || 'user',
       shelf_filter: shelf || 'all',
-      count: result.rows.length,
+      count: rows.length,
       export_sha256: exportHash,
-      notifications: result.rows
+      notifications: rows
     };
 
     res.setHeader('Content-Type', 'application/json');
@@ -584,7 +577,7 @@ app.get('/api/export', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Cron prune
+// Prune
 // ---------------------------------------------------------------
 app.get('/api/prune', async (req, res) => {
   if (CRON_SECRET && req.query.secret !== CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
@@ -621,7 +614,8 @@ const ICONS = {
   note: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
   whatsapp: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>',
   logout: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
-  trash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>'
+  trash: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  edit: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
 };
 
 // ===============================================================
@@ -634,7 +628,7 @@ const BASE_STYLES = `
     --accent-glow: rgba(108, 140, 255, 0.35); --danger: #ef4444; --success: #22c55e;
     --warning: #f59e0b; --border: #232838; --border-strong: #2f3548;
     --shadow: 0 8px 32px rgba(0,0,0,0.45); --shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
-    --input-bg: #0d1017; --pill-bg: #2a2f42; --sidebar: #0f121b;
+    --input-bg: #0d1017; --pill-bg: #2a2f42;
   }
   [data-theme="light"] {
     --bg: #f4f6fb; --bg-2: #eef1f8; --card: #ffffff; --card-hover: #f8fafc;
@@ -642,7 +636,7 @@ const BASE_STYLES = `
     --accent-glow: rgba(79, 107, 255, 0.25); --danger: #dc2626; --success: #16a34a;
     --warning: #d97706; --border: #e2e8f0; --border-strong: #cbd5e1;
     --shadow: 0 8px 32px rgba(15,23,42,0.08); --shadow-sm: 0 2px 8px rgba(15,23,42,0.06);
-    --input-bg: #ffffff; --pill-bg: #e2e8f0; --sidebar: #ffffff;
+    --input-bg: #ffffff; --pill-bg: #e2e8f0;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -877,7 +871,7 @@ function renderAuthPage(mode, error) {
 }
 
 // ===============================================================
-// NAV BAR
+// NAV
 // ===============================================================
 function navBar(email, active) {
   const cls = (path) => active === path ? 'nav-link active' : 'nav-link';
@@ -964,31 +958,31 @@ ${FOOTER_HTML}
 <div class="toast" id="toast"></div>
 <script>
   ${THEME_TOGGLE_SCRIPT} setupThemeToggle();
-  const toast = document.getElementById('toast');
-  let toastTimer = null;
+  var toast = document.getElementById('toast');
+  var toastTimer = null;
   function showToast(msg, isError) {
     toast.textContent = msg;
     toast.className = 'toast show' + (isError ? ' error' : '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.className = 'toast' + (isError ? ' error' : ''); }, 2200);
+    toastTimer = setTimeout(function() { toast.className = 'toast' + (isError ? ' error' : ''); }, 2200);
   }
   function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
   function timeAgo(iso) {
     if (!iso) return 'Never seen';
-    const diff = Date.now() - new Date(iso).getTime();
-    const m = Math.floor(diff / 60000);
+    var diff = Date.now() - new Date(iso).getTime();
+    var m = Math.floor(diff / 60000);
     if (m < 1) return 'just now';
     if (m < 60) return m + ' min ago';
-    const h = Math.floor(m / 60);
+    var h = Math.floor(m / 60);
     if (h < 24) return h + ' hr ago';
-    const d = Math.floor(h / 24);
+    var d = Math.floor(h / 24);
     return d + ' day' + (d === 1 ? '' : 's') + ' ago';
   }
   function webhookUrl(token) { return window.location.origin + '/webhook/' + token; }
   async function copyText(text, label) {
     try { await navigator.clipboard.writeText(text); showToast(label + ' copied'); }
     catch (e) {
-      const ta = document.createElement('textarea'); ta.value = text;
+      var ta = document.createElement('textarea'); ta.value = text;
       document.body.appendChild(ta); ta.select();
       try { document.execCommand('copy'); showToast(label + ' copied'); }
       catch (err) { showToast('Copy failed', true); }
@@ -996,17 +990,17 @@ ${FOOTER_HTML}
     }
   }
   async function loadDevices() {
-    const r = await fetch('/api/devices');
-    if (r.status === 401) return location.href = '/login';
-    const d = await r.json();
+    var r = await fetch('/api/devices');
+    if (r.status === 401) { location.href = '/login'; return; }
+    var d = await r.json();
     renderDevices(d.devices);
   }
   function renderDevices(devices) {
-    const c = document.getElementById('devices');
+    var c = document.getElementById('devices');
     if (!devices.length) { c.innerHTML = '<div class="empty">No devices yet. Add one above to generate a webhook URL.</div>'; return; }
-    c.innerHTML = devices.map(dev => {
-      const online = dev.last_seen_at && (Date.now() - new Date(dev.last_seen_at).getTime()) < 5 * 60 * 1000;
-      const url = webhookUrl(dev.token);
+    c.innerHTML = devices.map(function(dev) {
+      var online = dev.last_seen_at && (Date.now() - new Date(dev.last_seen_at).getTime()) < 5 * 60 * 1000;
+      var url = webhookUrl(dev.token);
       return '<div class="device" data-id="' + dev.id + '">' +
         '<div class="device-head"><div>' +
           '<div class="device-name">' + escapeHtml(dev.name) + '<span class="badge ' + (online ? 'online' : 'offline') + '">' + (online ? 'ONLINE' : 'IDLE') + '</span></div>' +
@@ -1025,44 +1019,44 @@ ${FOOTER_HTML}
       '</div>';
     }).join('');
   }
-  document.getElementById('create-btn').addEventListener('click', async () => {
-    const name = document.getElementById('new-name').value.trim();
-    const phone_number = document.getElementById('new-phone').value.trim();
-    if (!name) return showToast('Device name is required', true);
-    const r = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, phone_number }) });
-    const d = await r.json();
-    if (!r.ok) return showToast(d.error || 'Failed', true);
+  document.getElementById('create-btn').addEventListener('click', async function() {
+    var name = document.getElementById('new-name').value.trim();
+    var phone_number = document.getElementById('new-phone').value.trim();
+    if (!name) { showToast('Device name is required', true); return; }
+    var r = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, phone_number: phone_number }) });
+    var d = await r.json();
+    if (!r.ok) { showToast(d.error || 'Failed', true); return; }
     document.getElementById('new-name').value = '';
     document.getElementById('new-phone').value = '';
     showToast('Device created');
     loadDevices();
   });
-  document.getElementById('devices').addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('button[data-action]');
+  document.getElementById('devices').addEventListener('click', async function(ev) {
+    var btn = ev.target.closest('button[data-action]');
     if (!btn) return;
-    const action = btn.getAttribute('data-action');
+    var action = btn.getAttribute('data-action');
     if (action === 'copy-url') copyText(webhookUrl(btn.getAttribute('data-token')), 'Webhook URL');
     else if (action === 'copy-token') copyText(btn.getAttribute('data-token'), 'Token');
     else if (action === 'rename') {
-      const id = btn.getAttribute('data-id');
-      const n = prompt('New device name:', btn.getAttribute('data-name'));
+      var id = btn.getAttribute('data-id');
+      var n = prompt('New device name:', btn.getAttribute('data-name'));
       if (n === null) return;
-      const p = prompt('Phone number (optional):', btn.getAttribute('data-phone'));
+      var p = prompt('Phone number (optional):', btn.getAttribute('data-phone'));
       if (p === null) return;
-      const r = await fetch('/api/devices/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, phone_number: p }) });
-      if (!r.ok) { const d = await r.json(); return showToast(d.error || 'Failed', true); }
+      var r = await fetch('/api/devices/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, phone_number: p }) });
+      if (!r.ok) { var d = await r.json(); showToast(d.error || 'Failed', true); return; }
       showToast('Device updated'); loadDevices();
     } else if (action === 'rotate') {
       if (!confirm('Rotate token? The old webhook URL will stop working immediately.')) return;
-      const id = btn.getAttribute('data-id');
-      const r = await fetch('/api/devices/' + id + '/rotate', { method: 'POST' });
-      if (!r.ok) { const d = await r.json(); return showToast(d.error || 'Failed', true); }
+      var id2 = btn.getAttribute('data-id');
+      var r2 = await fetch('/api/devices/' + id2 + '/rotate', { method: 'POST' });
+      if (!r2.ok) { var d2 = await r2.json(); showToast(d2.error || 'Failed', true); return; }
       showToast('Token rotated'); loadDevices();
     } else if (action === 'delete') {
-      const id = btn.getAttribute('data-id');
+      var id3 = btn.getAttribute('data-id');
       if (!confirm('Delete device "' + btn.getAttribute('data-name') + '"?')) return;
-      const r = await fetch('/api/devices/' + id, { method: 'DELETE' });
-      if (!r.ok) { const d = await r.json(); return showToast(d.error || 'Failed', true); }
+      var r3 = await fetch('/api/devices/' + id3, { method: 'DELETE' });
+      if (!r3.ok) { var d3 = await r3.json(); showToast(d3.error || 'Failed', true); return; }
       showToast('Device deleted'); loadDevices();
     }
   });
@@ -1086,70 +1080,35 @@ function renderDashboard(email) {
 <script>${THEME_BOOTSTRAP}</script>
 <style>
   ${BASE_STYLES} ${NAV_STYLES} ${FOOTER_STYLES}
-  .layout {
-    max-width: 1400px; margin: 0 auto;
-    display: grid; grid-template-columns: 260px 1fr; gap: 24px;
-    padding: 24px;
-  }
-  @media (max-width: 900px) {
-    .layout { grid-template-columns: 1fr; padding: 16px; }
-    .sidebar { position: static !important; }
-  }
+  .layout { max-width: 1400px; margin: 0 auto; display: grid; grid-template-columns: 260px 1fr; gap: 24px; padding: 24px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; padding: 16px; } .sidebar { position: static !important; } }
 
-  /* Sidebar */
-  .sidebar {
-    position: sticky; top: 84px; align-self: start;
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 16px; padding: 16px;
-    box-shadow: var(--shadow-sm);
-  }
-  .sidebar-title {
-    font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--muted); font-weight: 700; margin-bottom: 10px; padding: 0 6px;
-  }
+  .sidebar { position: sticky; top: 84px; align-self: start; background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-shadow: var(--shadow-sm); }
+  .sidebar-title { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 700; margin-bottom: 10px; padding: 0 6px; }
   .shelf-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
-  .shelf-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 10px; border-radius: 9px; cursor: pointer;
-    color: var(--muted); font-size: 0.9em; font-weight: 500;
-    transition: background 0.15s, color 0.15s; position: relative;
-  }
+  .shelf-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; cursor: pointer; color: var(--muted); font-size: 0.9em; font-weight: 500; transition: background 0.15s, color 0.15s; position: relative; }
   .shelf-item:hover { background: var(--card-hover); color: var(--text); }
   .shelf-item.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--text); }
   .shelf-item .shelf-dot { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
-  .shelf-item .shelf-count {
-    margin-left: auto; font-size: 0.78em; color: var(--muted);
-    background: color-mix(in srgb, var(--muted) 15%, transparent);
-    padding: 1px 7px; border-radius: 999px;
-  }
+  .shelf-item .shelf-count { margin-left: auto; font-size: 0.78em; color: var(--muted); background: color-mix(in srgb, var(--muted) 15%, transparent); padding: 1px 7px; border-radius: 999px; }
   .shelf-item.active .shelf-count { color: var(--text); background: color-mix(in srgb, var(--accent) 30%, transparent); }
-  .shelf-item .shelf-actions {
-    display: none; gap: 4px; margin-left: 6px;
-  }
+  .shelf-item .shelf-actions { display: none; gap: 4px; margin-left: 6px; }
   .shelf-item:hover .shelf-actions { display: flex; }
-  .shelf-actions button {
-    background: transparent; border: none; cursor: pointer;
-    color: var(--muted); padding: 2px; border-radius: 4px;
-    display: flex; align-items: center;
-  }
+  .shelf-actions button { background: transparent; border: none; cursor: pointer; color: var(--muted); padding: 2px; border-radius: 4px; display: flex; align-items: center; }
   .shelf-actions button:hover { color: var(--danger); }
   .shelf-actions button.edit:hover { color: var(--accent); }
-  .new-shelf-btn {
-    width: 100%; padding: 10px;
-    background: transparent; border: 1px dashed var(--border);
-    color: var(--muted); border-radius: 10px; cursor: pointer;
-    font-size: 0.88em; font-weight: 500; font-family: inherit;
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    transition: border-color 0.15s, color 0.15s;
-  }
+  .new-shelf-btn { width: 100%; padding: 10px; background: transparent; border: 1px dashed var(--border); color: var(--muted); border-radius: 10px; cursor: pointer; font-size: 0.88em; font-weight: 500; font-family: inherit; display: flex; align-items: center; justify-content: center; gap: 8px; transition: border-color 0.15s, color 0.15s; }
   .new-shelf-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .new-shelf-btn svg { display: block; }
 
-  /* Main column */
   .main-col { min-width: 0; }
   .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
   .page-title { margin: 0; font-size: 1.4em; letter-spacing: -0.02em; }
   .page-sub { color: var(--muted); font-size: 0.9em; margin-top: 4px; }
   .head-actions { display: flex; gap: 8px; }
+  .export-btn { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 11px; padding: 9px 14px; cursor: pointer; font-weight: 600; font-size: 0.88em; font-family: inherit; display: inline-flex; align-items: center; gap: 6px; }
+  .export-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .export-btn svg { display: block; }
 
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
   .stat { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow-sm); position: relative; overflow: hidden; }
@@ -1161,25 +1120,11 @@ function renderDashboard(email) {
   .stat-value.small { font-size: 1.05em; }
 
   .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
-  .toolbar input, .toolbar select {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 11px; padding: 10px 13px; color: var(--text);
-    font-size: 0.9em; outline: none; font-family: inherit;
-    transition: border-color 0.15s, box-shadow 0.15s;
-  }
+  .toolbar input, .toolbar select { background: var(--card); border: 1px solid var(--border); border-radius: 11px; padding: 10px 13px; color: var(--text); font-size: 0.9em; outline: none; font-family: inherit; transition: border-color 0.15s, box-shadow 0.15s; }
   .toolbar input:focus, .toolbar select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-  .toolbar button {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: white; border: none; border-radius: 11px; padding: 10px 16px;
-    font-size: 0.9em; font-weight: 600; cursor: pointer; font-family: inherit;
-    box-shadow: 0 4px 16px var(--accent-glow);
-    display: inline-flex; align-items: center; gap: 6px;
-  }
+  .toolbar button { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: white; border: none; border-radius: 11px; padding: 10px 16px; font-size: 0.9em; font-weight: 600; cursor: pointer; font-family: inherit; box-shadow: 0 4px 16px var(--accent-glow); display: inline-flex; align-items: center; gap: 6px; }
   .toolbar button svg { display: block; }
-  .toolbar button:hover { transform: translateY(-1px); }
-  .toolbar button.ghost {
-    background: transparent; color: var(--text); border: 1px solid var(--border); box-shadow: none;
-  }
+  .toolbar button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); box-shadow: none; }
   .toolbar button.ghost:hover { border-color: var(--accent); color: var(--accent); }
   .toolbar button.danger { background: transparent; color: var(--danger); border: 1px solid var(--border); box-shadow: none; }
   .toolbar button.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
@@ -1189,98 +1134,40 @@ function renderDashboard(email) {
   .search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; display: flex; align-items: center; }
   .search-icon svg { display: block; }
 
-  .bulk-bar {
-    display: none; align-items: center; gap: 12px; flex-wrap: wrap;
-    background: color-mix(in srgb, var(--accent) 10%, var(--card));
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-    border-radius: 12px; padding: 12px 18px; margin-bottom: 16px; font-size: 0.9em; font-weight: 500;
-  }
+  .bulk-bar { display: none; align-items: center; gap: 12px; flex-wrap: wrap; background: color-mix(in srgb, var(--accent) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 12px; padding: 12px 18px; margin-bottom: 16px; font-size: 0.9em; font-weight: 500; }
   .bulk-bar.active { display: flex; }
-  .bulk-bar button {
-    background: var(--danger); color: white; border: none; border-radius: 9px;
-    padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 0.88em; font-family: inherit;
-  }
+  .bulk-bar button { background: var(--danger); color: white; border: none; border-radius: 9px; padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 0.88em; font-family: inherit; }
   .bulk-bar button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  .bulk-bar select {
-    background: var(--card); border: 1px solid var(--border); color: var(--text);
-    border-radius: 9px; padding: 7px 10px; font-size: 0.88em; font-family: inherit;
-  }
+  .bulk-bar select { background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 9px; padding: 7px 10px; font-size: 0.88em; font-family: inherit; }
 
   #notifications { display: flex; flex-direction: column; gap: 12px; }
-  .notification {
-    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-    padding: 16px 48px 16px 54px; position: relative; box-shadow: var(--shadow-sm);
-    transition: background 0.15s, transform 0.1s, opacity 0.3s, border-color 0.15s;
-  }
+  .notification { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px 48px 16px 54px; position: relative; box-shadow: var(--shadow-sm); transition: background 0.15s, transform 0.1s, opacity 0.3s, border-color 0.15s; }
   .notification:hover { background: var(--card-hover); transform: translateY(-1px); border-color: var(--border-strong); }
   .notification.deleting { opacity: 0.25; transform: scale(0.98); }
-  .notification::before {
-    content: ""; position: absolute; left: 0; top: 14px; bottom: 14px;
-    width: 4px; border-radius: 4px; background: var(--bar-color, var(--accent));
-  }
+  .notification::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 4px; border-radius: 4px; background: var(--bar-color, var(--accent)); }
   .checkbox-wrap { position: absolute; left: 18px; top: 18px; }
   .checkbox-wrap input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
-  .delete-btn {
-    position: absolute; top: 12px; right: 12px; width: 28px; height: 28px;
-    border-radius: 50%; border: none; background: transparent; color: var(--muted);
-    font-size: 1.15em; line-height: 1; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: background 0.15s, color 0.15s; font-family: inherit;
-  }
+  .delete-btn { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; border-radius: 50%; border: none; background: transparent; color: var(--muted); font-size: 1.15em; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s; font-family: inherit; }
   .delete-btn:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
   .row1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-  .app-pill {
-    font-size: 0.72em; font-weight: 700; padding: 4px 10px;
-    border-radius: 999px; background: var(--pill-color, var(--pill-bg));
-    color: #fff; letter-spacing: 0.3px;
-  }
-  .phone-pill, .shelf-pill, .device-pill {
-    font-size: 0.72em; font-weight: 600; padding: 4px 10px; border-radius: 999px;
-  }
+  .app-pill { font-size: 0.72em; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: var(--pill-color, var(--pill-bg)); color: #fff; letter-spacing: 0.3px; }
+  .phone-pill, .shelf-pill, .device-pill { font-size: 0.72em; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
   .phone-pill { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
   .device-pill { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
   .shelf-pill { background: color-mix(in srgb, var(--shelf-color, #6c8cff) 20%, transparent); color: var(--shelf-color, #6c8cff); border: 1px solid color-mix(in srgb, var(--shelf-color, #6c8cff) 40%, transparent); }
-  .tag-chip {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-size: 0.7em; font-weight: 600; padding: 3px 8px 3px 8px;
-    border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent);
-    color: var(--muted); cursor: pointer;
-  }
+  .tag-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 0.7em; font-weight: 600; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); cursor: pointer; }
   .tag-chip:hover { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
   .time { margin-left: auto; font-size: 0.76em; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .title { font-weight: 600; font-size: 1.02em; margin-bottom: 4px; word-wrap: break-word; }
   .body { color: var(--muted); font-size: 0.94em; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
-  .notes {
-    margin-top: 10px; padding: 9px 12px; font-size: 0.88em;
-    background: color-mix(in srgb, var(--warning) 12%, transparent);
-    border-left: 3px solid var(--warning); border-radius: 6px; color: var(--text);
-    white-space: pre-wrap; word-wrap: break-word;
-  }
-  .hash {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    font-size: 0.72em; color: var(--muted); opacity: 0.7; margin-top: 8px;
-    word-break: break-all;
-  }
-  .card-tools {
-    display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
-  }
-  .card-tools button {
-    background: transparent; border: 1px solid var(--border); color: var(--muted);
-    border-radius: 8px; padding: 4px 10px; font-size: 0.78em; font-weight: 500;
-    cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; gap: 5px;
-  }
+  .notes { margin-top: 10px; padding: 9px 12px; font-size: 0.88em; background: color-mix(in srgb, var(--warning) 12%, transparent); border-left: 3px solid var(--warning); border-radius: 6px; color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
+  .hash { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.72em; color: var(--muted); opacity: 0.7; margin-top: 8px; word-break: break-all; }
+  .card-tools { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .card-tools button { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 4px 10px; font-size: 0.78em; font-weight: 500; cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; gap: 5px; }
   .card-tools button:hover { border-color: var(--accent); color: var(--accent); }
   .card-tools button svg { display: block; }
-
   .empty { text-align: center; padding: 80px 20px; color: var(--muted); background: var(--card); border-radius: 16px; border: 1px dashed var(--border); }
-  .toast {
-    position: fixed; bottom: 24px; left: 50%;
-    transform: translateX(-50%) translateY(20px);
-    background: var(--card); border: 1px solid var(--border); color: var(--text);
-    padding: 13px 22px; border-radius: 11px; box-shadow: var(--shadow);
-    opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none;
-    font-size: 0.9em; z-index: 100; display: flex; align-items: center;
-  }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 13px 22px; border-radius: 11px; box-shadow: var(--shadow); opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; font-size: 0.9em; z-index: 100; display: flex; align-items: center; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
   .toast.error { border-color: var(--danger); color: var(--danger); }
 </style>
@@ -1290,18 +1177,7 @@ ${navBar(email, 'dashboard')}
 <div class="layout">
   <aside class="sidebar">
     <div class="sidebar-title">Shelves</div>
-    <div class="shelf-list" id="shelf-list">
-      <div class="shelf-item active" data-shelf="">
-        <span class="shelf-dot" style="background:var(--accent);"></span>
-        All
-        <span class="shelf-count" id="count-all">0</span>
-      </div>
-      <div class="shelf-item" data-shelf="__unsorted__">
-        <span class="shelf-dot" style="background:var(--muted);"></span>
-        Unsorted
-        <span class="shelf-count" id="count-unsorted">0</span>
-      </div>
-    </div>
+    <div class="shelf-list" id="shelf-list"></div>
     <button class="new-shelf-btn" id="new-shelf-btn">${ICONS.plus} New shelf</button>
   </aside>
 
@@ -1312,36 +1188,19 @@ ${navBar(email, 'dashboard')}
         <div class="page-sub" id="page-sub">Everything captured across all shelves</div>
       </div>
       <div class="head-actions">
-        <button class="toolbar-button" onclick="exportCurrent()" style="background:transparent;border:1px solid var(--border);color:var(--text);border-radius:11px;padding:9px 14px;cursor:pointer;font-weight:600;font-size:0.88em;font-family:inherit;display:inline-flex;align-items:center;gap:6px;">
-          ${ICONS.download} Export
-        </button>
+        <button class="export-btn" id="export-btn">${ICONS.download} Export</button>
       </div>
     </div>
 
     <div class="stats">
-      <div class="stat">
-        <div class="stat-label"><span class="stat-icon">${ICONS.bell}</span> Total</div>
-        <div class="stat-value" id="stat-total">0</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label"><span class="stat-icon">${ICONS.clock}</span> Last hour</div>
-        <div class="stat-value" id="stat-hour">0</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label"><span class="stat-icon">${ICONS.shelf}</span> Shelves</div>
-        <div class="stat-value small" id="stat-shelves">0</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label"><span class="stat-icon">${ICONS.smartphone}</span> Devices</div>
-        <div class="stat-value small" id="stat-devices">0</div>
-      </div>
+      <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.bell}</span> Total</div><div class="stat-value" id="stat-total">0</div></div>
+      <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.clock}</span> Last hour</div><div class="stat-value" id="stat-hour">0</div></div>
+      <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.shelf}</span> Shelves</div><div class="stat-value small" id="stat-shelves">0</div></div>
+      <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.smartphone}</span> Devices</div><div class="stat-value small" id="stat-devices">0</div></div>
     </div>
 
     <div class="toolbar">
-      <div class="search-wrap">
-        <span class="search-icon">${ICONS.search}</span>
-        <input type="text" id="search" placeholder="Search title or body...">
-      </div>
+      <div class="search-wrap"><span class="search-icon">${ICONS.search}</span><input type="text" id="search" placeholder="Search title or body..."></div>
       <select id="app-filter"><option value="">All apps</option></select>
       <select id="device-filter"><option value="">All devices</option></select>
       <button id="refresh-btn" class="ghost">${ICONS.refresh} Refresh</button>
@@ -1365,383 +1224,401 @@ ${FOOTER_HTML}
 <script>
   ${THEME_TOGGLE_SCRIPT} setupThemeToggle();
 
-  const APP_COLORS = {
-    'com.whatsapp':'#25D366','com.whatsapp.w4b':'#25D366','com.google.android.apps.messaging':'#4285F4','com.android.mms':'#4285F4','com.samsung.android.messaging':'#4285F4','com.facebook.katana':'#1877F2','com.facebook.orca':'#0084FF','com.instagram.android':'#E1306C','com.twitter.android':'#1DA1F2','org.telegram.messenger':'#229ED9','com.google.android.gm':'#EA4335','com.google.android.photos':'#FBBC04','com.android.systemui':'#6B7280','com.google.android.dialer':'#34A853','com.google.android.apps.maps':'#34A853','com.spotify.music':'#1DB954','com.netflix.mediaclient':'#E50914','com.google.android.youtube':'#FF0000','com.discord':'#5865F2','com.android.chrome':'#4285F4'
+  var APP_COLORS = {
+    'com.whatsapp':'#25D366','com.whatsapp.w4b':'#25D366','com.google.android.apps.messaging':'#4285F4','com.android.mms':'#4285F4','com.samsung.android.messaging':'#4285F4','com.facebook.katana':'#1877F2','com.facebook.orca':'#0084FF','com.instagram.android':'#E1306C','com.twitter.android':'#1DA1F2','org.telegram.messenger':'#229ED9','com.google.android.gm':'#EA4335','com.google.android.apps.photos':'#FBBC04','com.android.systemui':'#6B7280','com.google.android.dialer':'#34A853','com.google.android.apps.maps':'#34A853','com.spotify.music':'#1DB954','com.netflix.mediaclient':'#E50914','com.google.android.youtube':'#FF0000','com.discord':'#5865F2','com.android.chrome':'#4285F4'
   };
-  const DEFAULT_COLOR = '#6c8cff';
-  const colorFor = a => APP_COLORS[a] || DEFAULT_COLOR;
-  const shortApp = a => { if (!a) return 'unknown'; const p = a.split('.'); return p[p.length-1] || a; };
-  const escapeHtml = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
-  const formatTime = iso => new Date(iso).toLocaleString('en-GB', { timeZone:'Africa/Nairobi', year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) + ' EAT';
+  var DEFAULT_COLOR = '#6c8cff';
+  function colorFor(a) { return APP_COLORS[a] || DEFAULT_COLOR; }
+  function shortApp(a) { if (!a) return 'unknown'; var p = a.split('.'); return p[p.length-1] || a; }
+  function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
+  function formatTime(iso) {
+    return new Date(iso).toLocaleString('en-GB', { timeZone:'Africa/Nairobi', year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }) + ' EAT';
+  }
 
-  const toast = document.getElementById('toast');
-  let toastTimer = null;
+  var toast = document.getElementById('toast');
+  var toastTimer = null;
   function showToast(msg, isError) {
     toast.textContent = msg;
     toast.className = 'toast show' + (isError ? ' error' : '');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.className = 'toast' + (isError ? ' error' : ''); }, 2200);
+    toastTimer = setTimeout(function() { toast.className = 'toast' + (isError ? ' error' : ''); }, 2200);
   }
   function showUndoToast(msg, onUndo) {
     toast.innerHTML = '';
-    const t = document.createElement('span'); t.textContent = msg;
-    const b = document.createElement('button');
+    var t = document.createElement('span'); t.textContent = msg;
+    var b = document.createElement('button');
     b.textContent = 'Undo';
     b.style.cssText = 'margin-left:14px;background:transparent;border:1px solid var(--accent);color:var(--accent);padding:5px 12px;border-radius:7px;cursor:pointer;font-weight:600;font-family:inherit;';
-    b.onclick = () => { onUndo(); toast.className = 'toast'; };
+    b.onclick = function() { onUndo(); toast.className = 'toast'; };
     toast.appendChild(t); toast.appendChild(b);
     toast.className = 'toast show';
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.className = 'toast'; }, 5000);
+    toastTimer = setTimeout(function() { toast.className = 'toast'; }, 5000);
   }
 
-  let allItems = [];
-  let shelves = [];
-  let shelvesById = {};
-  let devicesById = {};
-  let activeShelf = '';
-  const selectedIds = new Set();
+  var allItems = [];
+  var shelves = [];
+  var shelvesById = {};
+  var devicesById = {};
+  var activeShelf = '';
+  var selectedIds = new Set();
 
   function updateBulkBar() {
-    const bar = document.getElementById('bulk-bar');
-    const c = document.getElementById('bulk-count');
+    var bar = document.getElementById('bulk-bar');
+    var c = document.getElementById('bulk-count');
     if (selectedIds.size > 0) { bar.classList.add('active'); c.textContent = selectedIds.size + ' selected'; }
     else bar.classList.remove('active');
   }
 
   function renderShelfList() {
-    const list = document.getElementById('shelf-list');
-    const counts = {};
-    let unsortedCount = 0;
-    allItems.forEach(n => {
+    var list = document.getElementById('shelf-list');
+    var counts = {};
+    var unsortedCount = 0;
+    allItems.forEach(function(n) {
       if (n.shelf_id === null || n.shelf_id === undefined) unsortedCount++;
       else counts[n.shelf_id] = (counts[n.shelf_id] || 0) + 1;
     });
 
-    const allCount = allItems.length;
-    let html = '';
+    var html = '';
     html += '<div class="shelf-item ' + (activeShelf === '' ? 'active' : '') + '" data-shelf="">' +
       '<span class="shelf-dot" style="background:var(--accent);"></span>All' +
-      '<span class="shelf-count">' + allCount + '</span></div>';
+      '<span class="shelf-count">' + allItems.length + '</span></div>';
     html += '<div class="shelf-item ' + (activeShelf === '__unsorted__' ? 'active' : '') + '" data-shelf="__unsorted__">' +
       '<span class="shelf-dot" style="background:var(--muted);"></span>Unsorted' +
       '<span class="shelf-count">' + unsortedCount + '</span></div>';
 
-    shelves.forEach(s => {
-      const c = counts[s.id] || 0;
-      const active = String(activeShelf) === String(s.id) ? 'active' : '';
+    shelves.forEach(function(s) {
+      var c = counts[s.id] || 0;
+      var active = String(activeShelf) === String(s.id) ? 'active' : '';
       html += '<div class="shelf-item ' + active + '" data-shelf="' + s.id + '">' +
         '<span class="shelf-dot" style="background:' + escapeHtml(s.color) + ';"></span>' +
         escapeHtml(s.name) +
         '<span class="shelf-count">' + c + '</span>' +
         '<span class="shelf-actions">' +
-          '<button class="edit" data-shelf-action="edit" data-id="' + s.id + '" title="Edit">' +
-            '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
-          '</button>' +
-          '<button data-shelf-action="delete" data-id="' + s.id + '" data-name="' + escapeHtml(s.name) + '" title="Delete">' +
-            '${ICONS.trash}' +
-          '</button>' +
+          '<button class="edit" data-shelf-action="edit" data-id="' + s.id + '" title="Edit">${ICONS.edit}</button>' +
+          '<button data-shelf-action="delete" data-id="' + s.id + '" data-name="' + escapeHtml(s.name) + '" title="Delete">${ICONS.trash}</button>' +
         '</span>' +
       '</div>';
     });
     list.innerHTML = html;
 
-    // Rebuild bulk-shelf-select
-    const sel = document.getElementById('bulk-shelf-select');
-    const cur = sel.value;
+    var sel = document.getElementById('bulk-shelf-select');
+    var cur = sel.value;
     sel.innerHTML = '<option value="">Move to shelf…</option>' +
       '<option value="__unsorted__">Unsorted</option>' +
-      shelves.map(s => '<option value="' + s.id + '">' + escapeHtml(s.name) + '</option>').join('');
+      shelves.map(function(s) { return '<option value="' + s.id + '">' + escapeHtml(s.name) + '</option>'; }).join('');
     sel.value = cur;
 
     document.getElementById('stat-shelves').textContent = shelves.length;
   }
 
   function renderList(items) {
-    const c = document.getElementById('notifications');
+    var c = document.getElementById('notifications');
     if (!items.length) {
       c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from Notifikator to get started.</span></div>';
       return;
     }
-    c.innerHTML = items.map(n => {
-      const color = colorFor(n.app);
-      const checked = selectedIds.has(String(n.id));
-      const dev = devicesById[n.device_id];
-      const shelf = shelvesById[n.shelf_id];
-      const tags = n.tags || [];
-      return '<div class="notification" data-id="' + n.id + '" style="--bar-color:' + color + ';">' +
-        '<div class="checkbox-wrap"><input type="checkbox" class="select-cb" data-id="' + n.id + '"' + (checked ? ' checked' : '') + '></div>' +
-        '<button class="delete-btn" title="Delete" data-id="' + n.id + '">×</button>' +
-        '<div class="row1">' +
-          '<span class="app-pill" style="--pill-color:' + color + ';">' + escapeHtml(shortApp(n.app)) + '</span>' +
-          (shelf ? '<span class="shelf-pill" style="--shelf-color:' + escapeHtml(shelf.color) + ';">' + escapeHtml(shelf.name) + '</span>' : '') +
-          (dev ? '<span class="device-pill">' + escapeHtml(dev.name) + '</span>' : '') +
-          '<span class="phone-pill">' + escapeHtml(n.phone || 'Unknown') + '</span>' +
-          tags.map(t => '<span class="tag-chip" data-tag-id="' + t.id + '" data-notif-id="' + n.id + '" title="Remove tag">' + escapeHtml(t.name) + ' ×</span>').join('') +
-          '<span class="time">' + formatTime(n.timestamp) + '</span>' +
-        '</div>' +
-        (n.title ? '<div class="title">' + escapeHtml(n.title) + '</div>' : '') +
-        (n.body  ? '<div class="body">'  + escapeHtml(n.body)  + '</div>' : '') +
-        (n.notes ? '<div class="notes">' + escapeHtml(n.notes) + '</div>' : '') +
-        '<div class="card-tools">' +
-          '<button data-tool="tag" data-id="' + n.id + '">' + ICONS.tag + ' Tag</button>' +
-          '<button data-tool="notes" data-id="' + n.id + '">' + ICONS.note + ' ' + (n.notes ? 'Edit note' : 'Note') + '</button>' +
-        '</div>' +
-        (n.hash ? '<div class="hash">sha256:' + n.hash.substring(0, 32) + '…</div>' : '') +
-      '</div>';
-    }).join('');
+    var parts = [];
+    items.forEach(function(n) {
+      try {
+        var color = colorFor(n.app);
+        var checked = selectedIds.has(String(n.id));
+        var dev = devicesById[n.device_id];
+        var shelf = shelvesById[n.shelf_id];
+        var tags = Array.isArray(n.tags) ? n.tags : [];
+        parts.push(
+          '<div class="notification" data-id="' + n.id + '" style="--bar-color:' + color + ';">' +
+            '<div class="checkbox-wrap"><input type="checkbox" class="select-cb" data-id="' + n.id + '"' + (checked ? ' checked' : '') + '></div>' +
+            '<button class="delete-btn" title="Delete" data-id="' + n.id + '">×</button>' +
+            '<div class="row1">' +
+              '<span class="app-pill" style="--pill-color:' + color + ';">' + escapeHtml(shortApp(n.app)) + '</span>' +
+              (shelf ? '<span class="shelf-pill" style="--shelf-color:' + escapeHtml(shelf.color) + ';">' + escapeHtml(shelf.name) + '</span>' : '') +
+              (dev ? '<span class="device-pill">' + escapeHtml(dev.name) + '</span>' : '') +
+              '<span class="phone-pill">' + escapeHtml(n.phone || 'Unknown') + '</span>' +
+              tags.map(function(t) {
+                return '<span class="tag-chip" data-tag-id="' + t.id + '" data-notif-id="' + n.id + '" title="Remove tag">' + escapeHtml(t.name) + ' ×</span>';
+              }).join('') +
+              '<span class="time">' + formatTime(n.timestamp) + '</span>' +
+            '</div>' +
+            (n.title ? '<div class="title">' + escapeHtml(n.title) + '</div>' : '') +
+            (n.body ? '<div class="body">' + escapeHtml(n.body) + '</div>' : '') +
+            (n.notes ? '<div class="notes">' + escapeHtml(n.notes) + '</div>' : '') +
+            '<div class="card-tools">' +
+              '<button data-tool="tag" data-id="' + n.id + '">${ICONS.tag} Tag</button>' +
+              '<button data-tool="notes" data-id="' + n.id + '">${ICONS.note} ' + (n.notes ? 'Edit note' : 'Note') + '</button>' +
+            '</div>' +
+            (n.hash ? '<div class="hash">sha256:' + n.hash.substring(0, 32) + '…</div>' : '') +
+          '</div>'
+        );
+      } catch (e) {
+        console.error('Failed to render notification', n, e);
+      }
+    });
+    c.innerHTML = parts.join('');
   }
 
   function renderStats(items) {
-    const total = items.length;
-    const hour = items.filter(n => new Date(n.timestamp).getTime() > Date.now() - 3600000).length;
+    var total = items.length;
+    var hour = items.filter(function(n) { return new Date(n.timestamp).getTime() > Date.now() - 3600000; }).length;
     document.getElementById('stat-total').textContent = total;
     document.getElementById('stat-hour').textContent = hour;
     document.getElementById('stat-devices').textContent = Object.keys(devicesById).length;
   }
 
   async function loadShelves() {
-    const r = await fetch('/api/shelves');
-    if (r.status === 401) return location.href = '/login';
-    const d = await r.json();
+    var r = await fetch('/api/shelves');
+    if (r.status === 401) { location.href = '/login'; return; }
+    var d = await r.json();
     shelves = d.shelves || [];
     shelvesById = {};
-    shelves.forEach(s => { shelvesById[s.id] = s; });
+    shelves.forEach(function(s) { shelvesById[s.id] = s; });
     renderShelfList();
   }
 
   async function loadDevices() {
-    const r = await fetch('/api/devices');
-    if (r.status === 401) return location.href = '/login';
-    const d = await r.json();
+    var r = await fetch('/api/devices');
+    if (r.status === 401) { location.href = '/login'; return; }
+    var d = await r.json();
     devicesById = {};
-    d.devices.forEach(x => { devicesById[x.id] = x; });
-    const sel = document.getElementById('device-filter');
-    const cur = sel.value;
+    d.devices.forEach(function(x) { devicesById[x.id] = x; });
+    var sel = document.getElementById('device-filter');
+    var cur = sel.value;
     sel.innerHTML = '<option value="">All devices</option>';
-    d.devices.forEach(x => { const o = document.createElement('option'); o.value = String(x.id); o.textContent = x.name; sel.appendChild(o); });
+    d.devices.forEach(function(x) {
+      var o = document.createElement('option');
+      o.value = String(x.id);
+      o.textContent = x.name;
+      sel.appendChild(o);
+    });
     sel.value = cur;
   }
 
   async function loadApps() {
-    const r = await fetch('/api/apps');
-    if (r.status === 401) return location.href = '/login';
-    const d = await r.json();
-    const sel = document.getElementById('app-filter');
-    const cur = sel.value;
+    var r = await fetch('/api/apps');
+    if (r.status === 401) { location.href = '/login'; return; }
+    var d = await r.json();
+    var sel = document.getElementById('app-filter');
+    var cur = sel.value;
     sel.innerHTML = '<option value="">All apps</option>';
-    d.apps.forEach(a => { const o = document.createElement('option'); o.value = a; o.textContent = shortApp(a); sel.appendChild(o); });
+    d.apps.forEach(function(a) {
+      var o = document.createElement('option');
+      o.value = a;
+      o.textContent = shortApp(a);
+      sel.appendChild(o);
+    });
     sel.value = cur;
   }
 
   async function loadNotifications() {
     try {
-      const r = await fetch('/api/notifications');
-      if (r.status === 401) return location.href = '/login';
-      const d = await r.json();
+      var r = await fetch('/api/notifications');
+      if (r.status === 401) { location.href = '/login'; return; }
+      var d = await r.json();
+      if (d.error) { console.error('API error:', d.error); showToast('Load error: ' + d.error, true); return; }
       allItems = d.notifications || [];
       applyFilters();
-    } catch (e) {}
+    } catch (e) {
+      console.error('loadNotifications failed', e);
+    }
   }
 
   function applyFilters() {
-    const q = document.getElementById('search').value.trim().toLowerCase();
-    const app = document.getElementById('app-filter').value;
-    const device = document.getElementById('device-filter').value;
+    var q = document.getElementById('search').value.trim().toLowerCase();
+    var app = document.getElementById('app-filter').value;
+    var device = document.getElementById('device-filter').value;
 
     renderShelfList();
     renderStats(allItems);
 
-    const f = allItems.filter(n => {
+    var f = allItems.filter(function(n) {
       if (activeShelf === '__unsorted__') { if (n.shelf_id !== null && n.shelf_id !== undefined) return false; }
       else if (activeShelf !== '') { if (String(n.shelf_id) !== String(activeShelf)) return false; }
       if (app && n.app !== app) return false;
       if (device && String(n.device_id) !== String(device)) return false;
-      if (q) { const h = ((n.title||'')+' '+(n.body||'')+' '+(n.notes||'')).toLowerCase(); if (!h.includes(q)) return false; }
+      if (q) {
+        var h = ((n.title || '') + ' ' + (n.body || '') + ' ' + (n.notes || '')).toLowerCase();
+        if (h.indexOf(q) === -1) return false;
+      }
       return true;
     });
     renderList(f);
     updateBulkBar();
 
-    // Update header title
-    const titleEl = document.getElementById('page-title');
-    const subEl = document.getElementById('page-sub');
+    var titleEl = document.getElementById('page-title');
+    var subEl = document.getElementById('page-sub');
     if (activeShelf === '') { titleEl.textContent = 'All notifications'; subEl.textContent = 'Everything captured across all shelves'; }
     else if (activeShelf === '__unsorted__') { titleEl.textContent = 'Unsorted'; subEl.textContent = 'Notifications not yet placed on a shelf'; }
     else {
-      const s = shelvesById[activeShelf];
+      var s = shelvesById[activeShelf];
       titleEl.textContent = s ? s.name : 'Shelf';
       subEl.textContent = 'Notifications assigned to this shelf';
     }
   }
 
-  // Sidebar clicks
-  document.getElementById('shelf-list').addEventListener('click', async (ev) => {
-    const action = ev.target.closest('button[data-shelf-action]');
+  document.getElementById('shelf-list').addEventListener('click', async function(ev) {
+    var action = ev.target.closest('button[data-shelf-action]');
     if (action) {
       ev.stopPropagation();
-      const id = parseInt(action.getAttribute('data-id'), 10);
+      var id = parseInt(action.getAttribute('data-id'), 10);
       if (action.getAttribute('data-shelf-action') === 'delete') {
         if (!confirm('Delete this shelf? Notifications inside will move to Unsorted.')) return;
-        const r = await fetch('/api/shelves/' + id, { method: 'DELETE' });
+        var r = await fetch('/api/shelves/' + id, { method: 'DELETE' });
         if (r.ok) { showToast('Shelf deleted'); if (String(activeShelf) === String(id)) activeShelf = ''; await loadShelves(); await loadNotifications(); }
       } else if (action.getAttribute('data-shelf-action') === 'edit') {
-        const s = shelvesById[id];
+        var s = shelvesById[id];
         if (!s) return;
-        const name = prompt('Shelf name:', s.name);
+        var name = prompt('Shelf name:', s.name);
         if (name === null) return;
-        const color = prompt('Color (hex):', s.color);
+        var color = prompt('Color (hex):', s.color);
         if (color === null) return;
-        const r = await fetch('/api/shelves/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color }) });
-        if (r.ok) { showToast('Shelf updated'); await loadShelves(); }
+        var r2 = await fetch('/api/shelves/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, color: color }) });
+        if (r2.ok) { showToast('Shelf updated'); await loadShelves(); }
       }
       return;
     }
-    const item = ev.target.closest('.shelf-item');
+    var item = ev.target.closest('.shelf-item');
     if (!item) return;
     activeShelf = item.getAttribute('data-shelf');
     applyFilters();
   });
 
-  document.getElementById('new-shelf-btn').addEventListener('click', async () => {
-    const name = prompt('Shelf name:');
+  document.getElementById('new-shelf-btn').addEventListener('click', async function() {
+    var name = prompt('Shelf name:');
     if (!name || !name.trim()) return;
-    const color = prompt('Color (hex, optional):', '#6c8cff');
-    const r = await fetch('/api/shelves', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), color: color || '#6c8cff' }) });
-    if (!r.ok) { const d = await r.json(); return showToast(d.error || 'Failed', true); }
+    var color = prompt('Color (hex, optional):', '#6c8cff');
+    var r = await fetch('/api/shelves', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), color: color || '#6c8cff' }) });
+    if (!r.ok) { var d = await r.json(); showToast(d.error || 'Failed', true); return; }
     showToast('Shelf created');
     await loadShelves();
   });
 
-  // Bulk shelf move
-  document.getElementById('bulk-move').addEventListener('click', async () => {
+  document.getElementById('bulk-move').addEventListener('click', async function() {
     if (!selectedIds.size) return;
-    const val = document.getElementById('bulk-shelf-select').value;
-    if (!val) return showToast('Pick a shelf first', true);
-    const shelf_id = val === '__unsorted__' ? null : parseInt(val, 10);
-    const ids = Array.from(selectedIds).map(x => parseInt(x, 10));
-    const r = await fetch('/api/notifications/bulk-shelf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, shelf_id }) });
-    if (!r.ok) { const d = await r.json(); return showToast(d.error || 'Failed', true); }
+    var val = document.getElementById('bulk-shelf-select').value;
+    if (!val) { showToast('Pick a shelf first', true); return; }
+    var shelf_id = val === '__unsorted__' ? null : parseInt(val, 10);
+    var ids = Array.from(selectedIds).map(function(x) { return parseInt(x, 10); });
+    var r = await fetch('/api/notifications/bulk-shelf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids, shelf_id: shelf_id }) });
+    if (!r.ok) { var d = await r.json(); showToast(d.error || 'Failed', true); return; }
     showToast('Moved ' + ids.length + ' notification(s)');
     selectedIds.clear();
     await loadNotifications();
   });
 
-  // Card tools
-  document.getElementById('notifications').addEventListener('click', async (ev) => {
-    // Delete
-    const del = ev.target.closest('.delete-btn');
+  document.getElementById('notifications').addEventListener('click', async function(ev) {
+    var del = ev.target.closest('.delete-btn');
     if (del) {
-      const id = del.getAttribute('data-id');
-      const item = allItems.find(n => String(n.id) === String(id));
+      var id = del.getAttribute('data-id');
+      var item = allItems.find(function(n) { return String(n.id) === String(id); });
       if (!item) return;
-      allItems = allItems.filter(n => String(n.id) !== String(id));
+      allItems = allItems.filter(function(n) { return String(n.id) !== String(id); });
       applyFilters();
-      const timer = setTimeout(async () => {
+      var timer = setTimeout(async function() {
         try { await fetch('/api/notifications/' + id, { method: 'DELETE' }); } catch (e) {}
       }, 5000);
-      showUndoToast('Notification deleted', () => {
+      showUndoToast('Notification deleted', function() {
         clearTimeout(timer);
         allItems.push(item);
-        allItems.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+        allItems.sort(function(a,b) { return new Date(b.timestamp) - new Date(a.timestamp); });
         applyFilters();
         showToast('Restored');
       });
       return;
     }
-    // Tag chip click = remove tag
-    const tagChip = ev.target.closest('.tag-chip');
+    var tagChip = ev.target.closest('.tag-chip');
     if (tagChip) {
-      const tagId = tagChip.getAttribute('data-tag-id');
-      const notifId = tagChip.getAttribute('data-notif-id');
-      const r = await fetch('/api/notifications/' + notifId + '/tags/' + tagId, { method: 'DELETE' });
+      var tagId = tagChip.getAttribute('data-tag-id');
+      var notifId = tagChip.getAttribute('data-notif-id');
+      var r = await fetch('/api/notifications/' + notifId + '/tags/' + tagId, { method: 'DELETE' });
       if (r.ok) { showToast('Tag removed'); await loadNotifications(); }
       return;
     }
-    // Card tool buttons
-    const tool = ev.target.closest('button[data-tool]');
+    var tool = ev.target.closest('button[data-tool]');
     if (tool) {
-      const id = tool.getAttribute('data-id');
-      const item = allItems.find(n => String(n.id) === String(id));
-      if (!item) return;
+      var id2 = tool.getAttribute('data-id');
+      var item2 = allItems.find(function(n) { return String(n.id) === String(id2); });
+      if (!item2) return;
       if (tool.getAttribute('data-tool') === 'tag') {
-        const name = prompt('Add tag (lowercase, one word):');
+        var name = prompt('Add tag (lowercase, one word):');
         if (!name || !name.trim()) return;
-        const r = await fetch('/api/notifications/' + id + '/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
-        if (r.ok) { showToast('Tag added'); await loadNotifications(); }
-        else { const d = await r.json(); showToast(d.error || 'Failed', true); }
+        var r2 = await fetch('/api/notifications/' + id2 + '/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+        if (r2.ok) { showToast('Tag added'); await loadNotifications(); }
+        else { var d2 = await r2.json(); showToast(d2.error || 'Failed', true); }
       } else if (tool.getAttribute('data-tool') === 'notes') {
-        const current = item.notes || '';
-        const notes = prompt('Note for this notification:', current);
+        var current = item2.notes || '';
+        var notes = prompt('Note for this notification:', current);
         if (notes === null) return;
-        const r = await fetch('/api/notifications/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }) });
-        if (r.ok) { showToast('Note saved'); await loadNotifications(); }
+        var r3 = await fetch('/api/notifications/' + id2, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes: notes }) });
+        if (r3.ok) { showToast('Note saved'); await loadNotifications(); }
       }
       return;
     }
   });
 
-  document.getElementById('notifications').addEventListener('change', ev => {
-    const cb = ev.target.closest('.select-cb');
+  document.getElementById('notifications').addEventListener('change', function(ev) {
+    var cb = ev.target.closest('.select-cb');
     if (!cb) return;
-    const id = cb.getAttribute('data-id');
-    if (cb.checked) selectedIds.add(String(id)); else selectedIds.delete(String(id));
+    var id = cb.getAttribute('data-id');
+    if (cb.checked) selectedIds.add(String(id));
+    else selectedIds.delete(String(id));
     updateBulkBar();
   });
 
-  document.getElementById('bulk-clear').addEventListener('click', () => { selectedIds.clear(); applyFilters(); });
-  document.getElementById('bulk-delete').addEventListener('click', () => {
+  document.getElementById('bulk-clear').addEventListener('click', function() { selectedIds.clear(); applyFilters(); });
+  document.getElementById('bulk-delete').addEventListener('click', function() {
     if (!selectedIds.size) return;
-    const ids = Array.from(selectedIds);
+    var ids = Array.from(selectedIds);
     if (!confirm('Delete ' + ids.length + ' notification(s)?')) return;
-    allItems = allItems.filter(n => !selectedIds.has(String(n.id)));
+    allItems = allItems.filter(function(n) { return !selectedIds.has(String(n.id)); });
     applyFilters();
     selectedIds.clear();
     updateBulkBar();
-    Promise.all(ids.map(id => fetch('/api/notifications/' + id, { method: 'DELETE' }).catch(() => null)))
-      .then(() => showToast('Deleted ' + ids.length + ' notification(s)'));
+    Promise.all(ids.map(function(id) {
+      return fetch('/api/notifications/' + id, { method: 'DELETE' }).catch(function() { return null; });
+    })).then(function() { showToast('Deleted ' + ids.length + ' notification(s)'); });
   });
 
-  document.getElementById('clear-btn').addEventListener('click', async () => {
+  document.getElementById('clear-btn').addEventListener('click', async function() {
     if (!confirm('Delete ALL notifications? This cannot be undone.')) return;
-    const r = await fetch('/api/notifications', { method: 'DELETE' });
-    const d = await r.json();
+    var r = await fetch('/api/notifications', { method: 'DELETE' });
+    var d = await r.json();
     if (r.ok) { allItems = []; selectedIds.clear(); applyFilters(); showToast('Cleared ' + d.deleted); }
   });
 
   document.getElementById('search').addEventListener('input', applyFilters);
   document.getElementById('app-filter').addEventListener('change', applyFilters);
   document.getElementById('device-filter').addEventListener('change', applyFilters);
-  document.getElementById('refresh-btn').addEventListener('click', () => { loadShelves(); loadDevices(); loadApps(); loadNotifications(); });
-
-  function exportCurrent() {
-    const params = new URLSearchParams();
+  document.getElementById('refresh-btn').addEventListener('click', function() {
+    loadShelves(); loadDevices(); loadApps(); loadNotifications();
+  });
+  document.getElementById('export-btn').addEventListener('click', function() {
+    var params = new URLSearchParams();
     if (activeShelf === '__unsorted__') params.set('shelf', '__unsorted__');
     else if (activeShelf !== '') params.set('shelf', activeShelf);
     window.location.href = '/api/export' + (params.toString() ? '?' + params.toString() : '');
-  }
+  });
 
-  const source = new EventSource('/api/stream');
-  source.addEventListener('notification', ev => {
-    const n = JSON.parse(ev.data);
-    if (!allItems.some(x => x.id === n.id)) {
+  var source = new EventSource('/api/stream');
+  source.addEventListener('notification', function(ev) {
+    var n = JSON.parse(ev.data);
+    if (!allItems.some(function(x) { return x.id === n.id; })) {
       n.tags = [];
       allItems.unshift(n);
       applyFilters();
-      const dev = devicesById[n.device_id];
+      var dev = devicesById[n.device_id];
       showToast('New: ' + shortApp(n.app) + (dev ? ' on ' + dev.name : ''));
     }
   });
-  source.addEventListener('deleted', ev => {
-    const { id } = JSON.parse(ev.data);
-    allItems = allItems.filter(n => n.id !== id);
+  source.addEventListener('deleted', function(ev) {
+    var payload = JSON.parse(ev.data);
+    allItems = allItems.filter(function(n) { return n.id !== payload.id; });
     applyFilters();
   });
-  source.addEventListener('cleared', () => { allItems = []; applyFilters(); });
-  source.addEventListener('notifications-changed', () => { loadNotifications(); });
-  source.addEventListener('shelves-changed', () => { loadShelves(); });
+  source.addEventListener('cleared', function() { allItems = []; applyFilters(); });
+  source.addEventListener('notifications-changed', function() { loadNotifications(); });
+  source.addEventListener('shelves-changed', function() { loadShelves(); });
 
-  (async () => {
+  (async function() {
     await loadShelves();
     await loadDevices();
     await loadApps();
