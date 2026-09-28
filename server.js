@@ -176,13 +176,14 @@ function broadcast(event, data) {
 }
 
 // ---------------------------------------------------------------
-// Webhook
+// Webhook — Bearer token (Message487) + URL path token (legacy)
 // ---------------------------------------------------------------
-app.post('/webhook/:token', async (req, res) => {
+async function handleWebhook(req, res, deviceToken) {
   try {
-    const token = req.params.token;
-    const deviceResult = await pool.query('SELECT id, user_id FROM devices WHERE token = $1', [token]);
-    if (deviceResult.rowCount === 0) return res.status(404).json({ error: 'Unknown device token' });
+    const deviceResult = await pool.query('SELECT id, user_id FROM devices WHERE token = $1', [deviceToken]);
+    if (deviceResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Unknown device token' });
+    }
     const device = deviceResult.rows[0];
 
     const payload = req.body;
@@ -193,10 +194,10 @@ app.post('/webhook/:token', async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, phone, app, title, body, device_id, shelf_id, notes, hash, timestamp`,
       [
-        payload.phone || null,
-        payload.app || null,
+        payload.phone || payload.device_code || null,
+        payload.app || payload.package || null,
         payload.title || null,
-        payload.body || null,
+        payload.body || payload.text || payload.message || null,
         device.id,
         hash,
         JSON.stringify(payload)
@@ -208,11 +209,41 @@ app.post('/webhook/:token', async (req, res) => {
     const row = inserted.rows[0];
     row.tags = [];
     broadcast('notification', row);
-    res.status(200).send('OK');
+
+    // Acknowledgement for Message487 (and any forwarder that expects JSON)
+    res.status(200).json({
+      status: 'ok',
+      id: row.id,
+      event: 'message',
+      received_at: new Date().toISOString()
+    });
   } catch (err) {
     console.error('Webhook error:', err);
-    res.status(500).send('Internal Server Error');
+    res.status(500).json({ error: 'Internal Server Error' });
   }
+}
+
+// Message487 default: POST /webhook with Authorization: Bearer <token>
+app.post('/webhook', async (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  let token = '';
+  if (authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else if (req.query.token) {
+    token = req.query.token;
+  } else if (req.body && req.body.device_code) {
+    // Fallback: look up device by its "name" (Message487 custom device code)
+    const byName = await pool.query('SELECT token FROM devices WHERE name = $1 LIMIT 1', [req.body.device_code]);
+    if (byName.rowCount > 0) token = byName.rows[0].token;
+  }
+
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+  return handleWebhook(req, res, token);
+});
+
+// Legacy: POST /webhook/:token (Notifikator, ntfy-frwrdr)
+app.post('/webhook/:token', async (req, res) => {
+  return handleWebhook(req, res, req.params.token);
 });
 
 // ---------------------------------------------------------------
@@ -396,7 +427,6 @@ app.delete('/api/shelves/:id', requireAuth, async (req, res) => {
 // Notifications API
 // ---------------------------------------------------------------
 function normaliseNotificationRow(row) {
-  // Ensure tags is always an array (Postgres json_agg may return a string in some driver configs)
   if (typeof row.tags === 'string') {
     try { row.tags = JSON.parse(row.tags); } catch (e) { row.tags = []; }
   }
@@ -1315,7 +1345,7 @@ ${FOOTER_HTML}
   function renderList(items) {
     var c = document.getElementById('notifications');
     if (!items.length) {
-      c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from Notifikator to get started.</span></div>';
+      c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from Message487 to get started.</span></div>';
       return;
     }
     var parts = [];
