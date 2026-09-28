@@ -148,6 +148,17 @@ function requireAuth(req, res, next) {
   res.redirect('/login');
 }
 
+// Data isolation helper — returns true only if the notification belongs to this user
+async function userOwnsNotification(userId, notificationId) {
+  const r = await pool.query(
+    `SELECT n.id FROM notifications n
+     JOIN devices d ON d.id = n.device_id
+     WHERE n.id = $1 AND d.user_id = $2`,
+    [notificationId, userId]
+  );
+  return r.rowCount > 0;
+}
+
 // ---------------------------------------------------------------
 // SSE
 // ---------------------------------------------------------------
@@ -210,7 +221,6 @@ async function handleWebhook(req, res, deviceToken) {
     row.tags = [];
     broadcast('notification', row);
 
-    // Acknowledgement for Message487 (and any forwarder that expects JSON)
     res.status(200).json({
       status: 'ok',
       id: row.id,
@@ -223,7 +233,6 @@ async function handleWebhook(req, res, deviceToken) {
   }
 }
 
-// Message487 default: POST /webhook with Authorization: Bearer <token>
 app.post('/webhook', async (req, res) => {
   const authHeader = req.headers.authorization || '';
   let token = '';
@@ -232,7 +241,6 @@ app.post('/webhook', async (req, res) => {
   } else if (req.query.token) {
     token = req.query.token;
   } else if (req.body && req.body.device_code) {
-    // Fallback: look up device by its "name" (Message487 custom device code)
     const byName = await pool.query('SELECT token FROM devices WHERE name = $1 LIMIT 1', [req.body.device_code]);
     if (byName.rowCount > 0) token = byName.rows[0].token;
   }
@@ -241,7 +249,6 @@ app.post('/webhook', async (req, res) => {
   return handleWebhook(req, res, token);
 });
 
-// Legacy: POST /webhook/:token (Notifikator, ntfy-frwrdr)
 app.post('/webhook/:token', async (req, res) => {
   return handleWebhook(req, res, req.params.token);
 });
@@ -305,7 +312,7 @@ app.get('/logout', (req, res) => req.session.destroy(() => res.redirect('/login'
 app.post('/logout', (req, res) => req.session.destroy(() => res.redirect('/login')));
 
 // ---------------------------------------------------------------
-// Devices API
+// Devices API (already user-scoped)
 // ---------------------------------------------------------------
 app.get('/api/devices', requireAuth, async (req, res) => {
   try {
@@ -369,7 +376,7 @@ app.delete('/api/devices/:id', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Shelves API
+// Shelves API (already user-scoped)
 // ---------------------------------------------------------------
 app.get('/api/shelves', requireAuth, async (req, res) => {
   try {
@@ -424,7 +431,7 @@ app.delete('/api/shelves/:id', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Notifications API
+// Notifications API — ALL user-scoped
 // ---------------------------------------------------------------
 function normaliseNotificationRow(row) {
   if (typeof row.tags === 'string') {
@@ -441,18 +448,20 @@ app.get('/api/notifications', requireAuth, async (req, res) => {
       SELECT n.id, n.phone, n.app, n.title, n.body, n.device_id, n.shelf_id, n.notes, n.hash, n.timestamp,
              COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]'::json) AS tags
       FROM notifications n
+      JOIN devices d ON d.id = n.device_id
       LEFT JOIN notification_tags nt ON nt.notification_id = n.id
       LEFT JOIN tags t ON t.id = nt.tag_id
+      WHERE d.user_id = $1
     `;
     const conditions = [];
-    const values = [];
+    const values = [req.session.userId];
 
     if (appFilter) { values.push(appFilter); conditions.push('n.app = $' + values.length); }
     if (device_id) { values.push(parseInt(device_id, 10)); conditions.push('n.device_id = $' + values.length); }
     if (shelf === '__unsorted__') conditions.push('n.shelf_id IS NULL');
     else if (shelf) { values.push(parseInt(shelf, 10)); conditions.push('n.shelf_id = $' + values.length); }
     if (q) { values.push('%' + q + '%'); conditions.push('(n.title ILIKE $' + values.length + ' OR n.body ILIKE $' + values.length + ')'); }
-    if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+    if (conditions.length) query += ' AND ' + conditions.join(' AND ');
     query += ' GROUP BY n.id ORDER BY n.timestamp DESC LIMIT 300';
 
     const result = await pool.query(query, values);
@@ -465,7 +474,14 @@ app.get('/api/notifications', requireAuth, async (req, res) => {
 
 app.get('/api/apps', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT DISTINCT app FROM notifications WHERE app IS NOT NULL ORDER BY app');
+    const result = await pool.query(
+      `SELECT DISTINCT n.app
+       FROM notifications n
+       JOIN devices d ON d.id = n.device_id
+       WHERE d.user_id = $1 AND n.app IS NOT NULL
+       ORDER BY n.app`,
+      [req.session.userId]
+    );
     res.json({ apps: result.rows.map(r => r.app) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -473,6 +489,9 @@ app.get('/api/apps', requireAuth, async (req, res) => {
 app.patch('/api/notifications/:id', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
+    if (!(await userOwnsNotification(req.session.userId, id))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     const { shelf_id, notes } = req.body;
     const updates = [];
     const values = [];
@@ -501,15 +520,26 @@ app.post('/api/notifications/bulk-shelf', requireAuth, async (req, res) => {
     const { ids, shelf_id } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
     const shelfVal = shelf_id === null ? null : parseInt(shelf_id, 10);
-    await pool.query('UPDATE notifications SET shelf_id = $1 WHERE id = ANY($2::int[])', [shelfVal, ids]);
+    const result = await pool.query(
+      `UPDATE notifications n
+       SET shelf_id = $1
+       FROM devices d
+       WHERE n.device_id = d.id
+         AND d.user_id = $2
+         AND n.id = ANY($3::int[])`,
+      [shelfVal, req.session.userId, ids]
+    );
     broadcast('notifications-changed', {});
-    res.json({ updated: ids.length });
+    res.json({ updated: result.rowCount });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/notifications/:id', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
+    if (!(await userOwnsNotification(req.session.userId, id))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     const result = await pool.query('DELETE FROM notifications WHERE id = $1', [id]);
     broadcast('deleted', { id });
     res.json({ deleted: result.rowCount });
@@ -518,14 +548,19 @@ app.delete('/api/notifications/:id', requireAuth, async (req, res) => {
 
 app.delete('/api/notifications', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM notifications');
+    const result = await pool.query(
+      `DELETE FROM notifications n
+       USING devices d
+       WHERE n.device_id = d.id AND d.user_id = $1`,
+      [req.session.userId]
+    );
     broadcast('cleared', {});
     res.json({ deleted: result.rowCount });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------------------------------------------------------------
-// Tags
+// Tags — user-scoped
 // ---------------------------------------------------------------
 app.get('/api/tags', requireAuth, async (req, res) => {
   try {
@@ -537,11 +572,11 @@ app.get('/api/tags', requireAuth, async (req, res) => {
 app.post('/api/notifications/:id/tags', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
+    if (!(await userOwnsNotification(req.session.userId, id))) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
     const name = (req.body.name || '').trim().toLowerCase();
     if (!name) return res.status(400).json({ error: 'Tag name required' });
-
-    const exists = await pool.query('SELECT id FROM notifications WHERE id = $1', [id]);
-    if (exists.rowCount === 0) return res.status(404).json({ error: 'Notification not found' });
 
     const tag = await pool.query(
       'INSERT INTO tags (user_id, name) VALUES ($1, $2) ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id, name',
@@ -560,6 +595,9 @@ app.delete('/api/notifications/:id/tags/:tagId', requireAuth, async (req, res) =
   try {
     const id = parseInt(req.params.id, 10);
     const tagId = parseInt(req.params.tagId, 10);
+    if (!(await userOwnsNotification(req.session.userId, id))) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     await pool.query('DELETE FROM notification_tags WHERE notification_id = $1 AND tag_id = $2', [id, tagId]);
     broadcast('notifications-changed', {});
     res.json({ removed: 1 });
@@ -567,7 +605,7 @@ app.delete('/api/notifications/:id/tags/:tagId', requireAuth, async (req, res) =
 });
 
 // ---------------------------------------------------------------
-// Export
+// Export — user-scoped
 // ---------------------------------------------------------------
 app.get('/api/export', requireAuth, async (req, res) => {
   try {
@@ -577,13 +615,14 @@ app.get('/api/export', requireAuth, async (req, res) => {
              d.name AS device_name,
              COALESCE(json_agg(json_build_object('id', t.id, 'name', t.name)) FILTER (WHERE t.id IS NOT NULL), '[]'::json) AS tags
       FROM notifications n
-      LEFT JOIN devices d ON d.id = n.device_id
+      JOIN devices d ON d.id = n.device_id
       LEFT JOIN notification_tags nt ON nt.notification_id = n.id
       LEFT JOIN tags t ON t.id = nt.tag_id
+      WHERE d.user_id = $1
     `;
-    const values = [];
-    if (shelf === '__unsorted__') query += ' WHERE n.shelf_id IS NULL';
-    else if (shelf) { values.push(parseInt(shelf, 10)); query += ' WHERE n.shelf_id = $1'; }
+    const values = [req.session.userId];
+    if (shelf === '__unsorted__') query += ' AND n.shelf_id IS NULL';
+    else if (shelf) { values.push(parseInt(shelf, 10)); query += ' AND n.shelf_id = $' + values.length; }
     query += ' GROUP BY n.id, d.name ORDER BY n.timestamp DESC LIMIT 2000';
 
     const result = await pool.query(query, values);
@@ -607,7 +646,30 @@ app.get('/api/export', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Prune
+// Debug / count — user-scoped
+// ---------------------------------------------------------------
+app.get('/count', requireAuth, async (req, res) => {
+  try {
+    const total = await pool.query(
+      `SELECT COUNT(*) FROM notifications n
+       JOIN devices d ON d.id = n.device_id
+       WHERE d.user_id = $1`,
+      [req.session.userId]
+    );
+    const latest = await pool.query(
+      `SELECT n.id, n.phone, n.app, n.title, n.body, n.device_id, n.timestamp
+       FROM notifications n
+       JOIN devices d ON d.id = n.device_id
+       WHERE d.user_id = $1
+       ORDER BY n.id DESC LIMIT 10`,
+      [req.session.userId]
+    );
+    res.json({ total: parseInt(total.rows[0].count, 10), latest: latest.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---------------------------------------------------------------
+// Prune (cron only — not user-scoped)
 // ---------------------------------------------------------------
 app.get('/api/prune', async (req, res) => {
   if (CRON_SECRET && req.query.secret !== CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
@@ -1345,7 +1407,7 @@ ${FOOTER_HTML}
   function renderList(items) {
     var c = document.getElementById('notifications');
     if (!items.length) {
-      c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from Message487 to get started.</span></div>';
+      c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from your forwarder to get started.</span></div>';
       return;
     }
     var parts = [];
