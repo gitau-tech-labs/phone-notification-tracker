@@ -33,6 +33,9 @@ async function initDb() {
 }
 initDb();
 
+// ---------------------------------------------------------------
+// Webhook — receives notifications from Notifikator
+// ---------------------------------------------------------------
 app.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
@@ -59,6 +62,9 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------
+// Debug / stats
+// ---------------------------------------------------------------
 app.get('/count', async (req, res) => {
   try {
     const total = await pool.query('SELECT COUNT(*) FROM notifications');
@@ -74,7 +80,9 @@ app.get('/count', async (req, res) => {
   }
 });
 
-// Simple JSON API used by the dashboard's live refresh
+// ---------------------------------------------------------------
+// JSON API
+// ---------------------------------------------------------------
 app.get('/api/notifications', async (req, res) => {
   try {
     const { app: appFilter, q } = req.query;
@@ -102,7 +110,6 @@ app.get('/api/notifications', async (req, res) => {
   }
 });
 
-// Distinct list of apps, for the filter dropdown
 app.get('/api/apps', async (req, res) => {
   try {
     const result = await pool.query(
@@ -114,6 +121,55 @@ app.get('/api/apps', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------
+// Delete endpoints
+// ---------------------------------------------------------------
+
+// Delete a single notification by id
+app.delete('/api/notifications/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid id' });
+    }
+    const result = await pool.query('DELETE FROM notifications WHERE id = $1', [id]);
+    res.json({ deleted: result.rowCount });
+  } catch (err) {
+    console.error('Error deleting notification:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete all notifications
+app.delete('/api/notifications', async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM notifications');
+    res.json({ deleted: result.rowCount });
+  } catch (err) {
+    console.error('Error clearing notifications:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Optional: prune anything older than N days
+// Enable by calling e.g. GET /api/prune?days=7
+app.get('/api/prune', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 7;
+    const result = await pool.query(
+      "DELETE FROM notifications WHERE timestamp < NOW() - ($1 || ' days')::interval",
+      [days]
+    );
+    res.json({ deleted: result.rowCount, olderThanDays: days });
+  } catch (err) {
+    console.error('Error pruning notifications:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------
 app.get('/', async (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -129,6 +185,7 @@ app.get('/', async (req, res) => {
     --text: #e6e8ef;
     --muted: #8b93a7;
     --accent: #6c8cff;
+    --danger: #ef4444;
     --border: #262a38;
     --shadow: 0 4px 20px rgba(0,0,0,0.35);
   }
@@ -243,6 +300,10 @@ app.get('/', async (req, res) => {
     cursor: pointer;
   }
   .toolbar button:hover { filter: brightness(1.1); }
+  .toolbar button.danger {
+    background: var(--danger);
+  }
+  .toolbar button.danger:hover { filter: brightness(1.15); }
   #notifications {
     display: flex;
     flex-direction: column;
@@ -252,14 +313,18 @@ app.get('/', async (req, res) => {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 14px 16px 14px 20px;
+    padding: 14px 44px 14px 20px;
     position: relative;
     box-shadow: var(--shadow);
-    transition: background 0.15s, transform 0.1s;
+    transition: background 0.15s, transform 0.1s, opacity 0.3s;
   }
   .notification:hover {
     background: var(--card-hover);
     transform: translateY(-1px);
+  }
+  .notification.deleting {
+    opacity: 0.3;
+    transform: scale(0.98);
   }
   .notification::before {
     content: "";
@@ -270,6 +335,28 @@ app.get('/', async (req, res) => {
     width: 4px;
     border-radius: 4px;
     background: var(--bar-color, var(--accent));
+  }
+  .delete-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 1.1em;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .delete-btn:hover {
+    background: rgba(239,68,68,0.15);
+    color: var(--danger);
   }
   .row1 {
     display: flex;
@@ -322,6 +409,31 @@ app.get('/', async (req, res) => {
     border-radius: 12px;
     border: 1px dashed var(--border);
   }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #1e2230;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 20px;
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    font-size: 0.9em;
+    z-index: 100;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  .toast.error {
+    border-color: var(--danger);
+    color: #fecaca;
+  }
   @media (max-width: 600px) {
     main { padding: 16px; }
     header { padding: 12px 16px; }
@@ -362,10 +474,13 @@ app.get('/', async (req, res) => {
       <option value="">All apps</option>
     </select>
     <button id="refresh-btn">Refresh</button>
+    <button id="clear-btn" class="danger">Clear all</button>
   </div>
 
   <div id="notifications"></div>
 </main>
+
+<div class="toast" id="toast"></div>
 
 <script>
   const APP_COLORS = {
@@ -425,6 +540,17 @@ app.get('/', async (req, res) => {
     }) + ' EAT';
   }
 
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+  function showToast(message, isError) {
+    toast.textContent = message;
+    toast.className = 'toast show' + (isError ? ' error' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.className = 'toast' + (isError ? ' error' : '');
+    }, 2200);
+  }
+
   function renderList(items) {
     const container = document.getElementById('notifications');
     if (!items.length) {
@@ -434,7 +560,8 @@ app.get('/', async (req, res) => {
     container.innerHTML = items.map(n => {
       const color = colorFor(n.app);
       return (
-        '<div class="notification" style="--bar-color:' + color + ';">' +
+        '<div class="notification" data-id="' + n.id + '" style="--bar-color:' + color + ';">' +
+          '<button class="delete-btn" title="Delete" data-id="' + n.id + '">×</button>' +
           '<div class="row1">' +
             '<span class="app-pill" style="--pill-color:' + color + ';">' + escapeHtml(shortApp(n.app)) + '</span>' +
             '<span class="phone-pill">' + escapeHtml(n.phone || 'Unknown') + '</span>' +
@@ -465,12 +592,15 @@ app.get('/', async (req, res) => {
       const res = await fetch('/api/apps');
       const data = await res.json();
       const select = document.getElementById('app-filter');
+      const current = select.value;
+      select.innerHTML = '<option value="">All apps</option>';
       data.apps.forEach(app => {
         const opt = document.createElement('option');
         opt.value = app;
         opt.textContent = shortApp(app);
         select.appendChild(opt);
       });
+      select.value = current;
     } catch (e) {
       console.error('Failed to load apps', e);
     }
@@ -509,9 +639,54 @@ app.get('/', async (req, res) => {
     renderList(filtered);
   }
 
+  // ---------------------------------------------------------
+  // Delete handlers (event delegation)
+  // ---------------------------------------------------------
+  document.getElementById('notifications').addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('.delete-btn');
+    if (!btn) return;
+
+    const id = btn.getAttribute('data-id');
+    const card = document.querySelector('.notification[data-id="' + id + '"]');
+    if (card) card.classList.add('deleting');
+
+    try {
+      const res = await fetch('/api/notifications/' + id, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Delete failed');
+
+      allItems = allItems.filter(n => String(n.id) !== String(id));
+      applyFilters();
+      showToast('Deleted notification #' + id);
+    } catch (e) {
+      if (card) card.classList.remove('deleting');
+      showToast('Failed: ' + e.message, true);
+    }
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', async () => {
+    const ok = confirm('Delete ALL notifications? This cannot be undone.');
+    if (!ok) return;
+
+    try {
+      const res = await fetch('/api/notifications', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Clear failed');
+
+      allItems = [];
+      applyFilters();
+      showToast('Cleared ' + data.deleted + ' notification(s)');
+    } catch (e) {
+      showToast('Failed: ' + e.message, true);
+    }
+  });
+
   document.getElementById('search').addEventListener('input', applyFilters);
   document.getElementById('app-filter').addEventListener('change', applyFilters);
-  document.getElementById('refresh-btn').addEventListener('click', loadNotifications);
+  document.getElementById('refresh-btn').addEventListener('click', () => {
+    loadApps();
+    loadNotifications();
+  });
 
   // Initial load + auto refresh every 20s
   loadApps();
