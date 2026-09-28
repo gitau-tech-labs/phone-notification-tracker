@@ -383,10 +383,25 @@ app.get('/', requireAuth, (req, res) => res.send(renderDashboard(req.session.ema
 app.get('/devices', requireAuth, (req, res) => res.send(renderDevicesPage(req.session.email || 'user')));
 
 // ===============================================================
+// SVG ICON SET
+// ===============================================================
+const ICONS = {
+  search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  refresh: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',
+  plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+  sun: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
+  moon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+  bell: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
+  clock: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  zap: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+  smartphone: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>',
+  whatsapp: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>',
+  logout: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>'
+};
+
+// ===============================================================
 // SHARED STYLES
 // ===============================================================
-
-// Theme variables + base styles + theme toggle button
 const BASE_STYLES = `
   :root, [data-theme="dark"] {
     --bg: #0b0d14;
@@ -455,14 +470,14 @@ const BASE_STYLES = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.1em;
+    padding: 0;
     transition: border-color 0.15s, background 0.15s, transform 0.1s;
   }
+  .theme-toggle svg { display: block; }
   .theme-toggle:hover { border-color: var(--accent); transform: scale(1.05); }
   .theme-toggle:active { transform: scale(0.95); }
 `;
 
-// Nav bar markup + styles
 const NAV_STYLES = `
   header.site-header {
     position: sticky;
@@ -539,7 +554,11 @@ const NAV_STYLES = `
     border-radius: 9px;
     transition: border-color 0.15s, color 0.15s;
     font-size: 0.95em;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
+  .logout svg { display: block; }
   .logout:hover { border-color: var(--danger); color: var(--danger); }
 `;
 
@@ -570,6 +589,7 @@ const FOOTER_STYLES = `
     background: rgba(37,211,102,0.22);
     transform: translateY(-1px);
   }
+  footer.site-footer .whatsapp-link svg { display: block; }
   footer.site-footer .credit { margin-top: 4px; color: var(--muted); }
   footer.site-footer .credit strong { color: var(--text); font-weight: 600; }
   footer.site-footer .version {
@@ -587,9 +607,7 @@ const FOOTER_HTML = `
   <footer class="site-footer">
     <div>
       <a class="whatsapp-link" href="https://wa.me/254745361106" target="_blank" rel="noopener">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/>
-        </svg>
+        ${ICONS.whatsapp}
         WhatsApp: 0745 361 106
       </a>
     </div>
@@ -613,14 +631,16 @@ const THEME_BOOTSTRAP = `
   })();
 `;
 
-// Theme toggle wiring — include once per page
+// Theme toggle wiring
 const THEME_TOGGLE_SCRIPT = `
   function setupThemeToggle() {
     var btn = document.getElementById('theme-toggle');
     if (!btn) return;
+    var SUN_SVG = ${JSON.stringify(ICONS.sun)};
+    var MOON_SVG = ${JSON.stringify(ICONS.moon)};
     function updateIcon() {
       var theme = document.documentElement.getAttribute('data-theme');
-      btn.textContent = theme === 'light' ? '🌙' : '☀️';
+      btn.innerHTML = theme === 'light' ? MOON_SVG : SUN_SVG;
       btn.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
     }
     btn.addEventListener('click', function() {
@@ -635,7 +655,7 @@ const THEME_TOGGLE_SCRIPT = `
 `;
 
 // ===============================================================
-// AUTH PAGE (login + signup)
+// AUTH PAGE
 // ===============================================================
 function renderAuthPage(mode, error) {
   const isSignup = mode === 'signup';
@@ -823,7 +843,7 @@ function navBar(email, active) {
       <div class="right-info">
         <span class="user-email">${escapeHtml(email)}</span>
         <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"></button>
-        <a class="logout" href="/logout">Sign out</a>
+        <a class="logout" href="/logout">${ICONS.logout} Sign out</a>
       </div>
     </div>
   </header>`;
@@ -857,7 +877,26 @@ function renderDevicesPage(email) {
     margin-bottom: 28px;
     box-shadow: var(--shadow-sm);
   }
-  .create-card h2 { margin: 0 0 16px 0; font-size: 1.05em; font-weight: 600; }
+  .section-title {
+    margin: 0 0 16px 0;
+    font-size: 1.05em;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white;
+    box-shadow: 0 4px 12px var(--accent-glow);
+  }
+  .section-icon svg { display: block; }
   .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
   .form-row input {
     flex: 1;
@@ -989,7 +1028,10 @@ ${navBar(email, 'devices')}
   </div>
 
   <div class="create-card">
-    <h2>➕ Add a new device</h2>
+    <h2 class="section-title">
+      <span class="section-icon">${ICONS.plus}</span>
+      Add a new device
+    </h2>
     <div class="form-row">
       <input type="text" id="new-name" placeholder="Device name (e.g. My Pixel)" maxlength="100">
       <input type="text" id="new-phone" placeholder="Phone number (optional)" maxlength="50">
@@ -1206,7 +1248,21 @@ function renderDashboard(email) {
     text-transform: uppercase;
     letter-spacing: 0.08em;
     margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
   }
+  .stat-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+  .stat-icon svg { width: 13px; height: 13px; display: block; }
   .stat-value {
     font-size: 1.85em;
     font-weight: 700;
@@ -1233,7 +1289,6 @@ function renderDashboard(email) {
     transition: border-color 0.15s, box-shadow 0.15s;
     font-family: inherit;
   }
-  .toolbar input { flex: 1; min-width: 200px; }
   .toolbar input:focus, .toolbar select:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-glow);
@@ -1259,6 +1314,27 @@ function renderDashboard(email) {
     box-shadow: none;
   }
   .toolbar button.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+
+  .search-wrap { position: relative; flex: 1; min-width: 200px; display: flex; }
+  .search-wrap input { flex: 1; padding-left: 38px; min-width: 0; }
+  .search-icon {
+    position: absolute;
+    left: 13px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+  }
+  .search-icon svg { display: block; }
+
+  .toolbar button.icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toolbar button.icon-btn svg { display: block; }
 
   .bulk-bar {
     display: none;
@@ -1422,28 +1498,31 @@ ${navBar(email, 'dashboard')}
 <main>
   <div class="stats">
     <div class="stat">
-      <div class="stat-label">Total notifications</div>
+      <div class="stat-label"><span class="stat-icon">${ICONS.bell}</span> Total notifications</div>
       <div class="stat-value" id="stat-total">0</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Last hour</div>
+      <div class="stat-label"><span class="stat-icon">${ICONS.clock}</span> Last hour</div>
       <div class="stat-value" id="stat-hour">0</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Top app</div>
+      <div class="stat-label"><span class="stat-icon">${ICONS.zap}</span> Top app</div>
       <div class="stat-value small" id="stat-top">—</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Devices</div>
+      <div class="stat-label"><span class="stat-icon">${ICONS.smartphone}</span> Devices</div>
       <div class="stat-value small" id="stat-devices">0</div>
     </div>
   </div>
 
   <div class="toolbar">
-    <input type="text" id="search" placeholder="🔍 Search title or body...">
+    <div class="search-wrap">
+      <span class="search-icon">${ICONS.search}</span>
+      <input type="text" id="search" placeholder="Search title or body...">
+    </div>
     <select id="app-filter"><option value="">All apps</option></select>
     <select id="device-filter"><option value="">All devices</option></select>
-    <button id="refresh-btn">↻ Refresh</button>
+    <button id="refresh-btn" class="icon-btn">${ICONS.refresh}<span>Refresh</span></button>
     <button id="clear-btn" class="danger">Clear all</button>
   </div>
 
