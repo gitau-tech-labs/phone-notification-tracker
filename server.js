@@ -98,7 +98,7 @@ app.use(session({
 // Helpers
 // ---------------------------------------------------------------
 function generateToken() {
-  return crypto.randomBytes(24).toString('base64url'); // 32 chars, URL-safe
+  return crypto.randomBytes(24).toString('base64url');
 }
 
 function escapeHtml(str) {
@@ -144,7 +144,7 @@ function broadcast(event, data) {
 }
 
 // ---------------------------------------------------------------
-// Webhook — token in URL identifies the device
+// Webhook
 // ---------------------------------------------------------------
 app.post('/webhook/:token', async (req, res) => {
   try {
@@ -254,9 +254,7 @@ app.get('/api/devices', requireAuth, async (req, res) => {
       [req.session.userId]
     );
     res.json({ devices: result.rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/devices', requireAuth, async (req, res) => {
@@ -270,10 +268,7 @@ app.post('/api/devices', requireAuth, async (req, res) => {
       [req.session.userId, name.trim(), (phone_number || '').trim() || null, token]
     );
     res.json({ device: result.rows[0] });
-  } catch (err) {
-    console.error('Error creating device:', err);
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.patch('/api/devices/:id', requireAuth, async (req, res) => {
@@ -288,9 +283,7 @@ app.patch('/api/devices/:id', requireAuth, async (req, res) => {
       [name ? name.trim() : null, phone_number !== undefined ? ((phone_number || '').trim() || null) : null, id]
     );
     res.json({ device: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/devices/:id/rotate', requireAuth, async (req, res) => {
@@ -305,9 +298,7 @@ app.post('/api/devices/:id/rotate', requireAuth, async (req, res) => {
       [newToken, id]
     );
     res.json({ device: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/devices/:id', requireAuth, async (req, res) => {
@@ -318,13 +309,11 @@ app.delete('/api/devices/:id', requireAuth, async (req, res) => {
 
     await pool.query('DELETE FROM devices WHERE id = $1', [id]);
     res.json({ deleted: 1 });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------------------------------------------------------------
-// Protected API routes
+// Protected API
 // ---------------------------------------------------------------
 app.get('/count', requireAuth, async (req, res) => {
   try {
@@ -391,150 +380,616 @@ app.get('/api/prune', async (req, res) => {
 // Pages
 // ---------------------------------------------------------------
 app.get('/', requireAuth, (req, res) => res.send(renderDashboard(req.session.email || 'user')));
-
 app.get('/devices', requireAuth, (req, res) => res.send(renderDevicesPage(req.session.email || 'user')));
 
-// ---------------------------------------------------------------
-// Render: Auth page
-// ---------------------------------------------------------------
+// ===============================================================
+// SHARED STYLES
+// ===============================================================
+
+// Theme variables + base styles + theme toggle button
+const BASE_STYLES = `
+  :root, [data-theme="dark"] {
+    --bg: #0b0d14;
+    --bg-2: #0f121b;
+    --card: #151925;
+    --card-hover: #1b2030;
+    --text: #eef1f8;
+    --muted: #8b93a7;
+    --accent: #6c8cff;
+    --accent-2: #8c5cff;
+    --accent-glow: rgba(108, 140, 255, 0.35);
+    --danger: #ef4444;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --border: #232838;
+    --border-strong: #2f3548;
+    --shadow: 0 8px 32px rgba(0,0,0,0.45);
+    --shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
+    --input-bg: #0d1017;
+    --pill-bg: #2a2f42;
+  }
+  [data-theme="light"] {
+    --bg: #f4f6fb;
+    --bg-2: #eef1f8;
+    --card: #ffffff;
+    --card-hover: #f8fafc;
+    --text: #0f172a;
+    --muted: #64748b;
+    --accent: #4f6bff;
+    --accent-2: #7c3aed;
+    --accent-glow: rgba(79, 107, 255, 0.25);
+    --danger: #dc2626;
+    --success: #16a34a;
+    --warning: #d97706;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --shadow: 0 8px 32px rgba(15,23,42,0.08);
+    --shadow-sm: 0 2px 8px rgba(15,23,42,0.06);
+    --input-bg: #ffffff;
+    --pill-bg: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    transition: background 0.25s ease, color 0.25s ease;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  .theme-toggle {
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1em;
+    transition: border-color 0.15s, background 0.15s, transform 0.1s;
+  }
+  .theme-toggle:hover { border-color: var(--accent); transform: scale(1.05); }
+  .theme-toggle:active { transform: scale(0.95); }
+`;
+
+// Nav bar markup + styles
+const NAV_STYLES = `
+  header.site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+  }
+  .header-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 700;
+    font-size: 1.08em;
+    letter-spacing: -0.01em;
+  }
+  .brand .logo {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 0.9em; font-weight: 800;
+    box-shadow: 0 4px 12px var(--accent-glow);
+  }
+  .brand .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 10px var(--success);
+    animation: pulse 2s infinite;
+    margin-left: -4px;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .nav { display: flex; gap: 4px; }
+  .nav-link {
+    color: var(--muted);
+    text-decoration: none;
+    padding: 7px 14px;
+    border-radius: 9px;
+    font-size: 0.9em;
+    font-weight: 500;
+    transition: background 0.15s, color 0.15s;
+  }
+  .nav-link:hover { color: var(--text); background: var(--card); }
+  .nav-link.active {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .right-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85em;
+    color: var(--muted);
+  }
+  .user-email { color: var(--text); font-weight: 500; }
+  .logout {
+    color: var(--muted);
+    text-decoration: none;
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 9px;
+    transition: border-color 0.15s, color 0.15s;
+    font-size: 0.95em;
+  }
+  .logout:hover { border-color: var(--danger); color: var(--danger); }
+`;
+
+const FOOTER_STYLES = `
+  footer.site-footer {
+    margin-top: 48px;
+    padding: 28px 24px 36px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.82em;
+    text-align: center;
+    line-height: 1.7;
+  }
+  footer.site-footer .whatsapp-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(37,211,102,0.12);
+    color: #25D366;
+    padding: 8px 16px;
+    border-radius: 999px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    text-decoration: none;
+    transition: background 0.15s, transform 0.1s;
+  }
+  footer.site-footer .whatsapp-link:hover {
+    background: rgba(37,211,102,0.22);
+    transform: translateY(-1px);
+  }
+  footer.site-footer .credit { margin-top: 4px; color: var(--muted); }
+  footer.site-footer .credit strong { color: var(--text); font-weight: 600; }
+  footer.site-footer .version {
+    display: inline-block;
+    font-size: 0.85em;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 2px 10px;
+    border-radius: 999px;
+    margin-top: 8px;
+  }
+`;
+
+const FOOTER_HTML = `
+  <footer class="site-footer">
+    <div>
+      <a class="whatsapp-link" href="https://wa.me/254745361106" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/>
+        </svg>
+        WhatsApp: 0745 361 106
+      </a>
+    </div>
+    <div class="credit">
+      Created by <strong>Gitau Computer Solutions</strong> and <strong>Gitau Tech Labs</strong>
+    </div>
+    <div class="version">Version 1.0</div>
+  </footer>
+`;
+
+// Theme bootstrap — must run before paint to avoid flash
+const THEME_BOOTSTRAP = `
+  (function() {
+    try {
+      var saved = localStorage.getItem('theme');
+      var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+`;
+
+// Theme toggle wiring — include once per page
+const THEME_TOGGLE_SCRIPT = `
+  function setupThemeToggle() {
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    function updateIcon() {
+      var theme = document.documentElement.getAttribute('data-theme');
+      btn.textContent = theme === 'light' ? '🌙' : '☀️';
+      btn.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
+    }
+    btn.addEventListener('click', function() {
+      var current = document.documentElement.getAttribute('data-theme');
+      var next = current === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch (e) {}
+      updateIcon();
+    });
+    updateIcon();
+  }
+`;
+
+// ===============================================================
+// AUTH PAGE (login + signup)
+// ===============================================================
 function renderAuthPage(mode, error) {
   const isSignup = mode === 'signup';
-  const title = isSignup ? 'Create account' : 'Sign in';
+  const title = isSignup ? 'Create your account' : 'Welcome back';
+  const sub = isSignup ? 'Sign up to start tracking your devices' : 'Sign in to view your dashboard';
   const submitLabel = isSignup ? 'Create account' : 'Sign in';
-  const switchText = isSignup ? 'Already have an account?' : 'Need an account?';
+  const switchText = isSignup ? 'Already have an account?' : "Don't have an account?";
   const switchLink = isSignup ? '/login' : '/signup';
-  const switchLabel = isSignup ? 'Sign in' : 'Sign up';
+  const switchLabel = isSignup ? 'Sign in' : 'Create one';
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title}</title>
+<title>${title} — Notification Dashboard</title>
+<script>${THEME_BOOTSTRAP}</script>
 <style>
-  :root { --bg:#0f1117; --card:#171a23; --text:#e6e8ef; --muted:#8b93a7; --accent:#6c8cff; --danger:#ef4444; --border:#262a38; }
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text); font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding:20px; }
-  .card { width:100%; max-width:400px; background:var(--card); border:1px solid var(--border); border-radius:14px; padding:32px 28px; box-shadow:0 10px 40px rgba(0,0,0,0.5); }
-  h1 { margin:0 0 4px 0; font-size:1.4em; }
-  .subtitle { color:var(--muted); font-size:0.9em; margin-bottom:24px; }
-  label { display:block; font-size:0.85em; color:var(--muted); margin-bottom:6px; margin-top:14px; }
-  input { width:100%; padding:11px 14px; border-radius:10px; border:1px solid var(--border); background:#0d1017; color:var(--text); font-size:0.95em; outline:none; transition:border-color 0.15s; }
-  input:focus { border-color:var(--accent); }
-  button { width:100%; margin-top:22px; padding:12px; background:var(--accent); color:white; border:none; border-radius:10px; font-size:1em; font-weight:600; cursor:pointer; }
-  button:hover { filter:brightness(1.1); }
-  .error { background:rgba(239,68,68,0.12); color:#fecaca; border:1px solid rgba(239,68,68,0.4); padding:10px 14px; border-radius:8px; font-size:0.88em; margin-bottom:18px; }
-  .switch { text-align:center; margin-top:20px; font-size:0.9em; color:var(--muted); }
-  .switch a { color:var(--accent); text-decoration:none; font-weight:600; }
+  ${BASE_STYLES}
+  ${FOOTER_STYLES}
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background:
+      radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 40%),
+      radial-gradient(circle at 80% 100%, color-mix(in srgb, var(--accent-2) 10%, transparent), transparent 40%),
+      var(--bg);
+  }
+  .top-bar {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 10;
+  }
+  .auth-card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 36px 32px;
+    box-shadow: var(--shadow);
+    margin: auto 0;
+  }
+  .logo-badge {
+    width: 52px; height: 52px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 1.4em; font-weight: 800;
+    box-shadow: 0 8px 24px var(--accent-glow);
+    margin-bottom: 18px;
+  }
+  .auth-card h1 {
+    margin: 0 0 6px 0;
+    font-size: 1.55em;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.92em;
+    margin-bottom: 26px;
+  }
+  label {
+    display: block;
+    font-size: 0.82em;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 8px;
+    margin-top: 16px;
+    letter-spacing: 0.02em;
+  }
+  input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--input-bg);
+    color: var(--text);
+    font-size: 0.95em;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+  }
+  input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  button.submit {
+    width: 100%;
+    margin-top: 26px;
+    padding: 13px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white;
+    border: none;
+    border-radius: 11px;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.15s;
+    box-shadow: 0 6px 20px var(--accent-glow);
+    font-family: inherit;
+  }
+  button.submit:hover { transform: translateY(-1px); box-shadow: 0 8px 26px var(--accent-glow); }
+  button.submit:active { transform: translateY(0); }
+  .error {
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    padding: 11px 14px;
+    border-radius: 10px;
+    font-size: 0.88em;
+    margin-bottom: 18px;
+  }
+  .switch {
+    text-align: center;
+    margin-top: 22px;
+    font-size: 0.9em;
+    color: var(--muted);
+  }
+  .switch a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .switch a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-  <form class="card" method="POST" action="${isSignup ? '/signup' : '/login'}">
+  <div class="top-bar">
+    <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"></button>
+  </div>
+
+  <form class="auth-card" method="POST" action="${isSignup ? '/signup' : '/login'}">
+    <div class="logo-badge">N</div>
     <h1>${title}</h1>
-    <div class="subtitle">Notification Dashboard</div>
-    ${error ? '<div class="error">' + error + '</div>' : ''}
+    <div class="subtitle">${sub}</div>
+    ${error ? '<div class="error">' + escapeHtml(error) + '</div>' : ''}
+
     <label for="email">Email</label>
-    <input type="email" id="email" name="email" required autocomplete="email" autofocus>
+    <input type="email" id="email" name="email" required autocomplete="email" autofocus placeholder="you@example.com">
+
     <label for="password">Password</label>
-    <input type="password" id="password" name="password" required autocomplete="${isSignup ? 'new-password' : 'current-password'}" minlength="${isSignup ? '8' : '1'}">
-    ${isSignup ? '<label for="confirm">Confirm password</label><input type="password" id="confirm" name="confirm" required autocomplete="new-password" minlength="8">' : ''}
-    <button type="submit">${submitLabel}</button>
+    <input type="password" id="password" name="password" required
+      autocomplete="${isSignup ? 'new-password' : 'current-password'}"
+      minlength="${isSignup ? '8' : '1'}"
+      placeholder="${isSignup ? 'At least 8 characters' : 'Your password'}">
+
+    ${isSignup ? `
+    <label for="confirm">Confirm password</label>
+    <input type="password" id="confirm" name="confirm" required autocomplete="new-password" minlength="8" placeholder="Repeat password">
+    ` : ''}
+
+    <button class="submit" type="submit">${submitLabel}</button>
     <div class="switch">${switchText} <a href="${switchLink}">${switchLabel}</a></div>
   </form>
+
+  ${FOOTER_HTML}
+
+<script>
+  ${THEME_TOGGLE_SCRIPT}
+  setupThemeToggle();
+</script>
 </body>
 </html>`;
 }
 
-// ---------------------------------------------------------------
-// Render: Shared nav bar
-// ---------------------------------------------------------------
+// ===============================================================
+// NAV BAR
+// ===============================================================
 function navBar(email, active) {
   const cls = (path) => active === path ? 'nav-link active' : 'nav-link';
   return `
-  <header>
+  <header class="site-header">
     <div class="header-inner">
-      <div class="brand"><div class="dot"></div> Notification Dashboard</div>
+      <div class="brand">
+        <div class="logo">N</div>
+        <div class="dot"></div>
+        Notification Dashboard
+      </div>
       <nav class="nav">
         <a class="${cls('dashboard')}" href="/">Dashboard</a>
         <a class="${cls('devices')}" href="/devices">Devices</a>
       </nav>
       <div class="right-info">
         <span class="user-email">${escapeHtml(email)}</span>
+        <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"></button>
         <a class="logout" href="/logout">Sign out</a>
       </div>
     </div>
   </header>`;
 }
 
-const NAV_STYLES = `
-  header { position:sticky; top:0; z-index:10; background:rgba(15,17,23,0.85); backdrop-filter:blur(10px); border-bottom:1px solid var(--border); padding:16px 24px; }
-  .header-inner { max-width:1100px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
-  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:1.15em; }
-  .dot { width:10px; height:10px; border-radius:50%; background:#22c55e; box-shadow:0 0 12px #22c55e; animation:pulse 2s infinite; }
-  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-  .nav { display:flex; gap:6px; }
-  .nav-link { color:var(--muted); text-decoration:none; padding:6px 12px; border-radius:8px; font-size:0.9em; font-weight:500; transition:background 0.15s, color 0.15s; }
-  .nav-link:hover { color:var(--text); background:rgba(255,255,255,0.05); }
-  .nav-link.active { color:var(--text); background:rgba(108,140,255,0.15); }
-  .right-info { display:flex; align-items:center; gap:14px; font-size:0.85em; color:var(--muted); }
-  .user-email { color:var(--text); font-weight:500; }
-  .logout { color:var(--muted); text-decoration:none; border:1px solid var(--border); padding:5px 10px; border-radius:8px; transition:border-color 0.15s, color 0.15s; }
-  .logout:hover { border-color:var(--danger); color:var(--danger); }
-`;
-
-// ---------------------------------------------------------------
-// Render: Devices page
-// ---------------------------------------------------------------
+// ===============================================================
+// DEVICES PAGE
+// ===============================================================
 function renderDevicesPage(email) {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>My Devices</title>
+<title>My Devices — Notification Dashboard</title>
+<script>${THEME_BOOTSTRAP}</script>
 <style>
-  :root { --bg:#0f1117; --card:#171a23; --card-hover:#1e2230; --text:#e6e8ef; --muted:#8b93a7; --accent:#6c8cff; --danger:#ef4444; --border:#262a38; --shadow:0 4px 20px rgba(0,0,0,0.35); }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+  ${BASE_STYLES}
   ${NAV_STYLES}
-  main { max-width:1100px; margin:0 auto; padding:24px; }
-  h1 { margin:0 0 6px 0; font-size:1.4em; }
-  .subtitle { color:var(--muted); font-size:0.9em; margin-bottom:24px; }
-  .create-card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:24px; box-shadow:var(--shadow); }
-  .create-card h2 { margin:0 0 14px 0; font-size:1.05em; }
-  .form-row { display:flex; gap:10px; flex-wrap:wrap; }
-  .form-row input { flex:1; min-width:180px; background:#0d1017; border:1px solid var(--border); border-radius:10px; padding:10px 14px; color:var(--text); font-size:0.95em; outline:none; transition:border-color 0.15s; }
-  .form-row input:focus { border-color:var(--accent); }
-  .form-row button { background:var(--accent); color:white; border:none; border-radius:10px; padding:10px 18px; font-size:0.95em; font-weight:600; cursor:pointer; }
-  .form-row button:hover { filter:brightness(1.1); }
-  .devices { display:flex; flex-direction:column; gap:14px; }
-  .device { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px 20px; box-shadow:var(--shadow); }
-  .device-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
-  .device-name { font-size:1.1em; font-weight:600; }
-  .device-meta { color:var(--muted); font-size:0.82em; margin-top:2px; }
-  .badge { display:inline-block; font-size:0.7em; font-weight:700; padding:2px 8px; border-radius:999px; margin-left:8px; letter-spacing:0.3px; }
-  .badge.online { background:rgba(34,197,94,0.15); color:#22c55e; }
-  .badge.offline { background:rgba(139,147,167,0.15); color:var(--muted); }
-  .url-row { display:flex; gap:8px; align-items:stretch; margin-top:12px; }
-  .url-box { flex:1; background:#0d1017; border:1px solid var(--border); border-radius:10px; padding:10px 14px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:0.82em; color:#a8bcff; word-break:break-all; }
-  .btn { background:transparent; border:1px solid var(--border); border-radius:10px; padding:8px 14px; color:var(--text); font-size:0.85em; font-weight:500; cursor:pointer; transition:border-color 0.15s, color 0.15s; white-space:nowrap; }
-  .btn:hover { border-color:var(--accent); color:var(--accent); }
-  .btn.danger:hover { border-color:var(--danger); color:var(--danger); }
-  .device-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-  .empty { text-align:center; padding:60px 20px; color:var(--muted); background:var(--card); border-radius:12px; border:1px dashed var(--border); }
-  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:#1e2230; border:1px solid var(--border); color:var(--text); padding:12px 20px; border-radius:10px; box-shadow:var(--shadow); opacity:0; transition:opacity 0.25s, transform 0.25s; pointer-events:none; font-size:0.9em; z-index:100; }
-  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
-  .toast.error { border-color:var(--danger); color:#fecaca; }
+  ${FOOTER_STYLES}
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 24px; }
+  .page-head { margin-bottom: 28px; }
+  .page-head h1 { margin: 0 0 6px 0; font-size: 1.6em; letter-spacing: -0.02em; }
+  .page-head .subtitle { color: var(--muted); font-size: 0.95em; }
+
+  .create-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 22px 24px;
+    margin-bottom: 28px;
+    box-shadow: var(--shadow-sm);
+  }
+  .create-card h2 { margin: 0 0 16px 0; font-size: 1.05em; font-weight: 600; }
+  .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .form-row input {
+    flex: 1;
+    min-width: 180px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 0.95em;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+  }
+  .form-row input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  .form-row button {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white;
+    border: none;
+    border-radius: 11px;
+    padding: 11px 20px;
+    font-size: 0.95em;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px var(--accent-glow);
+    transition: transform 0.1s;
+    font-family: inherit;
+  }
+  .form-row button:hover { transform: translateY(-1px); }
+  .form-row button:active { transform: translateY(0); }
+
+  .devices { display: flex; flex-direction: column; gap: 16px; }
+  .device {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.15s;
+  }
+  .device:hover { border-color: var(--border-strong); }
+  .device-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .device-name { font-size: 1.12em; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  .device-meta { color: var(--muted); font-size: 0.83em; margin-top: 4px; }
+  .badge {
+    display: inline-block;
+    font-size: 0.68em;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 999px;
+    letter-spacing: 0.5px;
+  }
+  .badge.online { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+  .badge.offline { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+  .url-row { display: flex; gap: 8px; align-items: stretch; margin-top: 12px; flex-wrap: wrap; }
+  .url-box {
+    flex: 1;
+    min-width: 220px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 11px 14px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.82em;
+    color: var(--accent);
+    word-break: break-all;
+  }
+  .btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 9px 14px;
+    color: var(--text);
+    font-size: 0.85em;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .btn.danger:hover { border-color: var(--danger); color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  .device-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .empty {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--muted);
+    background: var(--card);
+    border-radius: 16px;
+    border: 1px dashed var(--border);
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 13px 22px;
+    border-radius: 11px;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    font-size: 0.9em;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
 </style>
 </head>
 <body>
 ${navBar(email, 'devices')}
 <main>
-  <h1>My Devices</h1>
-  <div class="subtitle">Each device gets its own webhook URL. Paste it into the Notifikator app on that phone.</div>
+  <div class="page-head">
+    <h1>My Devices</h1>
+    <div class="subtitle">Each device gets its own webhook URL. Paste it into the Notifikator app on that phone.</div>
+  </div>
 
   <div class="create-card">
-    <h2>Add a new device</h2>
+    <h2>➕ Add a new device</h2>
     <div class="form-row">
       <input type="text" id="new-name" placeholder="Device name (e.g. My Pixel)" maxlength="100">
       <input type="text" id="new-phone" placeholder="Phone number (optional)" maxlength="50">
@@ -544,9 +999,13 @@ ${navBar(email, 'devices')}
 
   <div class="devices" id="devices"></div>
 </main>
+${FOOTER_HTML}
 <div class="toast" id="toast"></div>
 
 <script>
+  ${THEME_TOGGLE_SCRIPT}
+  setupThemeToggle();
+
   const toast = document.getElementById('toast');
   let toastTimer = null;
   function showToast(msg, isError) {
@@ -572,20 +1031,14 @@ ${navBar(email, 'devices')}
     return d + ' day' + (d === 1 ? '' : 's') + ' ago';
   }
 
-  function webhookUrl(token) {
-    return window.location.origin + '/webhook/' + token;
-  }
+  function webhookUrl(token) { return window.location.origin + '/webhook/' + token; }
 
   async function copyText(text, label) {
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast(label + ' copied');
-    } catch (e) {
-      // Fallback
+    try { await navigator.clipboard.writeText(text); showToast(label + ' copied'); }
+    catch (e) {
       const ta = document.createElement('textarea');
       ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
+      document.body.appendChild(ta); ta.select();
       try { document.execCommand('copy'); showToast(label + ' copied'); }
       catch (err) { showToast('Copy failed', true); }
       document.body.removeChild(ta);
@@ -705,74 +1158,292 @@ ${navBar(email, 'devices')}
 </html>`;
 }
 
-// ---------------------------------------------------------------
-// Render: Dashboard
-// ---------------------------------------------------------------
+// ===============================================================
+// DASHBOARD PAGE
+// ===============================================================
 function renderDashboard(email) {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Notification Dashboard</title>
+<title>Dashboard — Notification Tracker</title>
+<script>${THEME_BOOTSTRAP}</script>
 <style>
-  :root { --bg:#0f1117; --card:#171a23; --card-hover:#1e2230; --text:#e6e8ef; --muted:#8b93a7; --accent:#6c8cff; --danger:#ef4444; --border:#262a38; --shadow:0 4px 20px rgba(0,0,0,0.35); }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+  ${BASE_STYLES}
   ${NAV_STYLES}
-  main { max-width:1100px; margin:0 auto; padding:24px; }
-  .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:12px; margin-bottom:20px; }
-  .stat { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; box-shadow:var(--shadow); }
-  .stat-label { color:var(--muted); font-size:0.78em; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:6px; }
-  .stat-value { font-size:1.6em; font-weight:700; }
-  .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:20px; }
-  .toolbar input, .toolbar select { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px 14px; color:var(--text); font-size:0.95em; outline:none; transition:border-color 0.15s; }
-  .toolbar input { flex:1; min-width:200px; }
-  .toolbar input:focus, .toolbar select:focus { border-color:var(--accent); }
-  .toolbar button { background:var(--accent); color:white; border:none; border-radius:10px; padding:10px 16px; font-size:0.95em; font-weight:600; cursor:pointer; }
-  .toolbar button:hover { filter:brightness(1.1); }
-  .toolbar button.danger { background:var(--danger); }
-  .bulk-bar { display:none; align-items:center; gap:12px; background:#1e2230; border:1px solid var(--accent); border-radius:10px; padding:10px 16px; margin-bottom:12px; font-size:0.9em; }
-  .bulk-bar.active { display:flex; }
-  .bulk-bar button { background:var(--danger); color:white; border:none; border-radius:8px; padding:6px 12px; font-weight:600; cursor:pointer; font-size:0.9em; }
-  .bulk-bar button.secondary { background:transparent; border:1px solid var(--border); color:var(--text); }
-  #notifications { display:flex; flex-direction:column; gap:12px; }
-  .notification { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px 44px 14px 52px; position:relative; box-shadow:var(--shadow); transition:background 0.15s, transform 0.1s, opacity 0.3s; }
-  .notification:hover { background:var(--card-hover); transform:translateY(-1px); }
-  .notification.deleting { opacity:0.3; transform:scale(0.98); }
-  .notification::before { content:""; position:absolute; left:0; top:12px; bottom:12px; width:4px; border-radius:4px; background:var(--bar-color, var(--accent)); }
-  .checkbox-wrap { position:absolute; left:16px; top:16px; }
-  .checkbox-wrap input { width:18px; height:18px; accent-color:var(--accent); cursor:pointer; }
-  .delete-btn { position:absolute; top:10px; right:10px; width:26px; height:26px; border-radius:50%; border:none; background:transparent; color:var(--muted); font-size:1.1em; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 0.15s, color 0.15s; }
-  .delete-btn:hover { background:rgba(239,68,68,0.15); color:var(--danger); }
-  .row1 { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
-  .app-pill { font-size:0.75em; font-weight:700; padding:3px 10px; border-radius:999px; background:var(--pill-color, #2a2f42); color:#fff; letter-spacing:0.3px; }
-  .phone-pill { font-size:0.75em; font-weight:600; padding:3px 10px; border-radius:999px; background:rgba(108,140,255,0.15); color:#a8bcff; }
-  .device-pill { font-size:0.75em; font-weight:600; padding:3px 10px; border-radius:999px; background:rgba(34,197,94,0.15); color:#22c55e; }
-  .time { margin-left:auto; font-size:0.78em; color:var(--muted); white-space:nowrap; }
-  .title { font-weight:600; font-size:1.02em; margin-bottom:4px; word-wrap:break-word; }
-  .body { color:#c4c9d8; font-size:0.95em; line-height:1.45; white-space:pre-wrap; word-wrap:break-word; }
-  .empty { text-align:center; padding:60px 20px; color:var(--muted); background:var(--card); border-radius:12px; border:1px dashed var(--border); }
-  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:#1e2230; border:1px solid var(--border); color:var(--text); padding:12px 20px; border-radius:10px; box-shadow:var(--shadow); opacity:0; transition:opacity 0.25s, transform 0.25s; pointer-events:none; font-size:0.9em; z-index:100; display:flex; align-items:center; }
-  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); pointer-events:auto; }
-  .toast.error { border-color:var(--danger); color:#fecaca; }
-  @media (max-width:600px) { main { padding:16px; } header { padding:12px 16px; } .time { width:100%; margin-left:0; } }
+  ${FOOTER_STYLES}
+  main { max-width: 1180px; margin: 0 auto; padding: 32px 24px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .stat {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    box-shadow: var(--shadow-sm);
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.15s, border-color 0.15s;
+  }
+  .stat:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+  .stat::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
+  .stat-label {
+    color: var(--muted);
+    font-size: 0.72em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 1.85em;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+  .stat-value.small { font-size: 1.15em; }
+
+  .toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    align-items: center;
+  }
+  .toolbar input, .toolbar select {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 0.92em;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+  }
+  .toolbar input { flex: 1; min-width: 200px; }
+  .toolbar input:focus, .toolbar select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  .toolbar button {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white;
+    border: none;
+    border-radius: 11px;
+    padding: 11px 18px;
+    font-size: 0.92em;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px var(--accent-glow);
+    transition: transform 0.1s;
+    font-family: inherit;
+  }
+  .toolbar button:hover { transform: translateY(-1px); }
+  .toolbar button.danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--border);
+    box-shadow: none;
+  }
+  .toolbar button.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+
+  .bulk-bar {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    background: color-mix(in srgb, var(--accent) 10%, var(--card));
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 12px;
+    padding: 12px 18px;
+    margin-bottom: 16px;
+    font-size: 0.9em;
+    font-weight: 500;
+  }
+  .bulk-bar.active { display: flex; }
+  .bulk-bar button {
+    background: var(--danger);
+    color: white;
+    border: none;
+    border-radius: 9px;
+    padding: 7px 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.88em;
+    font-family: inherit;
+  }
+  .bulk-bar button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  #notifications { display: flex; flex-direction: column; gap: 12px; }
+  .notification {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 48px 16px 54px;
+    position: relative;
+    box-shadow: var(--shadow-sm);
+    transition: background 0.15s, transform 0.1s, opacity 0.3s, border-color 0.15s;
+  }
+  .notification:hover {
+    background: var(--card-hover);
+    transform: translateY(-1px);
+    border-color: var(--border-strong);
+  }
+  .notification.deleting { opacity: 0.25; transform: scale(0.98); }
+  .notification::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 14px; bottom: 14px;
+    width: 4px;
+    border-radius: 4px;
+    background: var(--bar-color, var(--accent));
+  }
+  .checkbox-wrap { position: absolute; left: 18px; top: 18px; }
+  .checkbox-wrap input {
+    width: 18px; height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .delete-btn {
+    position: absolute;
+    top: 12px; right: 12px;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 1.15em;
+    line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    font-family: inherit;
+  }
+  .delete-btn:hover {
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
+  }
+  .row1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .app-pill {
+    font-size: 0.72em;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--pill-color, var(--pill-bg));
+    color: #fff;
+    letter-spacing: 0.3px;
+  }
+  .phone-pill {
+    font-size: 0.72em;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+  }
+  .device-pill {
+    font-size: 0.72em;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    color: var(--success);
+  }
+  .time {
+    margin-left: auto;
+    font-size: 0.76em;
+    color: var(--muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .title { font-weight: 600; font-size: 1.02em; margin-bottom: 4px; word-wrap: break-word; }
+  .body { color: var(--muted); font-size: 0.94em; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .empty {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--muted);
+    background: var(--card);
+    border-radius: 16px;
+    border: 1px dashed var(--border);
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 13px 22px;
+    border-radius: 11px;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    font-size: 0.9em;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  @media (max-width: 600px) {
+    main { padding: 20px 16px; }
+    header.site-header { padding: 12px 16px; }
+    .time { width: 100%; margin-left: 0; }
+    .stat-value { font-size: 1.5em; }
+  }
 </style>
 </head>
 <body>
 ${navBar(email, 'dashboard')}
 <main>
   <div class="stats">
-    <div class="stat"><div class="stat-label">Total</div><div class="stat-value" id="stat-total">0</div></div>
-    <div class="stat"><div class="stat-label">Last hour</div><div class="stat-value" id="stat-hour">0</div></div>
-    <div class="stat"><div class="stat-label">Top app</div><div class="stat-value" id="stat-top" style="font-size:1em;">—</div></div>
+    <div class="stat">
+      <div class="stat-label">Total notifications</div>
+      <div class="stat-value" id="stat-total">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Last hour</div>
+      <div class="stat-value" id="stat-hour">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Top app</div>
+      <div class="stat-value small" id="stat-top">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Devices</div>
+      <div class="stat-value small" id="stat-devices">0</div>
+    </div>
   </div>
 
   <div class="toolbar">
-    <input type="text" id="search" placeholder="Search title or body...">
+    <input type="text" id="search" placeholder="🔍 Search title or body...">
     <select id="app-filter"><option value="">All apps</option></select>
     <select id="device-filter"><option value="">All devices</option></select>
-    <button id="refresh-btn">Refresh</button>
+    <button id="refresh-btn">↻ Refresh</button>
     <button id="clear-btn" class="danger">Clear all</button>
   </div>
 
@@ -784,9 +1455,13 @@ ${navBar(email, 'dashboard')}
 
   <div id="notifications"></div>
 </main>
+${FOOTER_HTML}
 <div class="toast" id="toast"></div>
 
 <script>
+  ${THEME_TOGGLE_SCRIPT}
+  setupThemeToggle();
+
   const APP_COLORS = {
     'com.whatsapp':'#25D366','com.whatsapp.w4b':'#25D366','com.google.android.apps.messaging':'#4285F4','com.android.mms':'#4285F4','com.samsung.android.messaging':'#4285F4','com.facebook.katana':'#1877F2','com.facebook.orca':'#0084FF','com.instagram.android':'#E1306C','com.twitter.android':'#1DA1F2','org.telegram.messenger':'#229ED9','com.google.android.gm':'#EA4335','com.google.android.apps.photos':'#FBBC04','com.android.systemui':'#6B7280','com.google.android.dialer':'#34A853','com.google.android.apps.maps':'#34A853','com.spotify.music':'#1DB954','com.netflix.mediaclient':'#E50914','com.google.android.youtube':'#FF0000','com.discord':'#5865F2','org.mozilla.firefox':'#FF7139','com.android.chrome':'#4285F4'
   };
@@ -809,7 +1484,7 @@ ${navBar(email, 'dashboard')}
     const t = document.createElement('span'); t.textContent = msg;
     const b = document.createElement('button');
     b.textContent = 'Undo';
-    b.style.cssText = 'margin-left:14px;background:transparent;border:1px solid var(--accent);color:var(--accent);padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600;';
+    b.style.cssText = 'margin-left:14px;background:transparent;border:1px solid var(--accent);color:var(--accent);padding:5px 12px;border-radius:7px;cursor:pointer;font-weight:600;font-family:inherit;';
     b.onclick = () => { onUndo(); toast.className = 'toast'; };
     toast.appendChild(t); toast.appendChild(b);
     toast.className = 'toast show';
@@ -830,7 +1505,10 @@ ${navBar(email, 'dashboard')}
 
   function renderList(items) {
     const c = document.getElementById('notifications');
-    if (!items.length) { c.innerHTML = '<div class="empty">No notifications match your filters.</div>'; return; }
+    if (!items.length) {
+      c.innerHTML = '<div class="empty">No notifications match your filters.<br><span style="font-size:0.9em;opacity:0.7;margin-top:8px;display:inline-block;">Send a test from Notifikator to get started.</span></div>';
+      return;
+    }
     c.innerHTML = items.map(n => {
       const color = colorFor(n.app);
       const checked = selectedIds.has(String(n.id));
@@ -860,6 +1538,7 @@ ${navBar(email, 'dashboard')}
     document.getElementById('stat-total').textContent = total;
     document.getElementById('stat-hour').textContent = hour;
     document.getElementById('stat-top').textContent = top ? shortApp(top) + ' (' + counts[top] + ')' : '—';
+    document.getElementById('stat-devices').textContent = Object.keys(devicesById).length;
   }
 
   async function loadDevices() {
@@ -879,6 +1558,7 @@ ${navBar(email, 'dashboard')}
       sel.appendChild(o);
     });
     sel.value = cur;
+    document.getElementById('stat-devices').textContent = d.devices.length;
   }
 
   async function loadApps() {
@@ -899,7 +1579,6 @@ ${navBar(email, 'dashboard')}
       const d = await r.json();
       allItems = d.notifications || [];
       applyFilters();
-      document.getElementById('status') && (document.getElementById('status').textContent = 'Live — connected');
     } catch (e) {}
   }
 
@@ -973,7 +1652,7 @@ ${navBar(email, 'dashboard')}
   document.getElementById('refresh-btn').addEventListener('click', () => { loadApps(); loadDevices(); loadNotifications(); });
 
   const source = new EventSource('/api/stream');
-  source.addEventListener('hello', () => { document.getElementById('status') && (document.getElementById('status').textContent = 'Live — connected'); });
+  source.addEventListener('hello', () => {});
   source.addEventListener('notification', ev => {
     const n = JSON.parse(ev.data);
     if (!allItems.some(x => x.id === n.id)) {
@@ -989,7 +1668,7 @@ ${navBar(email, 'dashboard')}
     applyFilters();
   });
   source.addEventListener('cleared', () => { allItems = []; applyFilters(); });
-  source.onerror = () => { const s = document.getElementById('status'); if (s) s.textContent = 'Reconnecting...'; };
+  source.onerror = () => {};
 
   (async () => {
     await loadDevices();
@@ -1001,6 +1680,9 @@ ${navBar(email, 'dashboard')}
 </html>`;
 }
 
+// ---------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------
 app.listen(port, function() {
   console.log('Server running on port ' + port);
 });
