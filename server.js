@@ -9,6 +9,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-please';
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const DISABLE_SIGNUPS = String(process.env.DISABLE_SIGNUPS || '').toLowerCase() === 'true';
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -49,9 +51,11 @@ async function initDb() {
         id SERIAL PRIMARY KEY,
         email VARCHAR(255) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW()
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_login_at TIMESTAMPTZ
       )
     `);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ`);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS devices (
@@ -105,6 +109,7 @@ async function initDb() {
     `);
 
     console.log('Database tables initialized.');
+    if (ADMIN_EMAILS.length) console.log('Admin emails:', ADMIN_EMAILS.join(', '));
   } catch (err) {
     console.error('Error initializing database:', err);
   }
@@ -140,6 +145,10 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+function isAdminEmail(email) {
+  return email && ADMIN_EMAILS.includes(String(email).toLowerCase());
+}
+
 function requireAuth(req, res, next) {
   if (req.session && req.session.userId) return next();
   if (req.path.startsWith('/api/') || req.path === '/webhook' || req.path.startsWith('/webhook/')) {
@@ -148,7 +157,18 @@ function requireAuth(req, res, next) {
   res.redirect('/login');
 }
 
-// Data isolation helper — returns true only if the notification belongs to this user
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.userId) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
+    return res.redirect('/login');
+  }
+  if (!isAdminEmail(req.session.email)) {
+    if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'Forbidden' });
+    return res.status(403).send('Forbidden — admin access only');
+  }
+  next();
+}
+
 async function userOwnsNotification(userId, notificationId) {
   const r = await pool.query(
     `SELECT n.id FROM notifications n
@@ -187,7 +207,7 @@ function broadcast(event, data) {
 }
 
 // ---------------------------------------------------------------
-// Webhook — Bearer token (Message487) + URL path token (legacy)
+// Webhook
 // ---------------------------------------------------------------
 async function handleWebhook(req, res, deviceToken) {
   try {
@@ -258,10 +278,14 @@ app.post('/webhook/:token', async (req, res) => {
 // ---------------------------------------------------------------
 app.get('/signup', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/');
+  if (DISABLE_SIGNUPS) {
+    return res.send(renderAuthPage('login', 'Signups are currently disabled. Contact the administrator.'));
+  }
   res.send(renderAuthPage('signup', null));
 });
 
 app.post('/signup', async (req, res) => {
+  if (DISABLE_SIGNUPS) return res.status(403).send(renderAuthPage('login', 'Signups are currently disabled.'));
   const { email, password, confirm } = req.body;
   try {
     if (!email || !password) return res.status(400).send(renderAuthPage('signup', 'Email and password are required.'));
@@ -273,7 +297,7 @@ app.post('/signup', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 12);
     const inserted = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
+      'INSERT INTO users (email, password_hash, last_login_at) VALUES ($1, $2, NOW()) RETURNING id, email',
       [email.toLowerCase(), hash]
     );
 
@@ -302,6 +326,7 @@ app.post('/login', async (req, res) => {
     if (!ok) return res.status(401).send(renderAuthPage('login', 'Invalid email or password.'));
     req.session.userId = user.id;
     req.session.email = user.email;
+    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
     res.redirect('/');
   } catch (err) {
     res.status(500).send(renderAuthPage('login', 'Something went wrong. Try again.'));
@@ -312,7 +337,7 @@ app.get('/logout', (req, res) => req.session.destroy(() => res.redirect('/login'
 app.post('/logout', (req, res) => req.session.destroy(() => res.redirect('/login')));
 
 // ---------------------------------------------------------------
-// Devices API (already user-scoped)
+// Devices API
 // ---------------------------------------------------------------
 app.get('/api/devices', requireAuth, async (req, res) => {
   try {
@@ -376,7 +401,7 @@ app.delete('/api/devices/:id', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Shelves API (already user-scoped)
+// Shelves API
 // ---------------------------------------------------------------
 app.get('/api/shelves', requireAuth, async (req, res) => {
   try {
@@ -431,7 +456,7 @@ app.delete('/api/shelves/:id', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Notifications API — ALL user-scoped
+// Notifications API
 // ---------------------------------------------------------------
 function normaliseNotificationRow(row) {
   if (typeof row.tags === 'string') {
@@ -560,7 +585,7 @@ app.delete('/api/notifications', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Tags — user-scoped
+// Tags
 // ---------------------------------------------------------------
 app.get('/api/tags', requireAuth, async (req, res) => {
   try {
@@ -605,7 +630,7 @@ app.delete('/api/notifications/:id/tags/:tagId', requireAuth, async (req, res) =
 });
 
 // ---------------------------------------------------------------
-// Export — user-scoped
+// Export
 // ---------------------------------------------------------------
 app.get('/api/export', requireAuth, async (req, res) => {
   try {
@@ -646,7 +671,7 @@ app.get('/api/export', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Debug / count — user-scoped
+// Debug / count
 // ---------------------------------------------------------------
 app.get('/count', requireAuth, async (req, res) => {
   try {
@@ -669,7 +694,98 @@ app.get('/count', requireAuth, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Prune (cron only — not user-scoped)
+// ADMIN API
+// ---------------------------------------------------------------
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const totalUsers = await pool.query('SELECT COUNT(*) FROM users');
+    const usersLast7 = await pool.query("SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '7 days'");
+    const usersToday = await pool.query("SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '1 day'");
+    const activeUsers7 = await pool.query("SELECT COUNT(*) FROM users WHERE last_login_at > NOW() - INTERVAL '7 days'");
+    const totalDevices = await pool.query('SELECT COUNT(*) FROM devices');
+    const devicesOnline = await pool.query("SELECT COUNT(*) FROM devices WHERE last_seen_at > NOW() - INTERVAL '5 minutes'");
+    const totalNotifs = await pool.query('SELECT COUNT(*) FROM notifications');
+    const notifs24h = await pool.query("SELECT COUNT(*) FROM notifications WHERE timestamp > NOW() - INTERVAL '1 day'");
+    const notifs7d = await pool.query("SELECT COUNT(*) FROM notifications WHERE timestamp > NOW() - INTERVAL '7 days'");
+
+    let dbSize = '—';
+    try {
+      const size = await pool.query("SELECT pg_size_pretty(pg_database_size(current_database())) AS s");
+      dbSize = size.rows[0].s;
+    } catch (e) {}
+
+    const mem = process.memoryUsage();
+    const uptime = process.uptime();
+
+    res.json({
+      users: {
+        total: parseInt(totalUsers.rows[0].count, 10),
+        last7: parseInt(usersLast7.rows[0].count, 10),
+        today: parseInt(usersToday.rows[0].count, 10),
+        active7: parseInt(activeUsers7.rows[0].count, 10)
+      },
+      devices: {
+        total: parseInt(totalDevices.rows[0].count, 10),
+        online: parseInt(devicesOnline.rows[0].count, 10)
+      },
+      notifications: {
+        total: parseInt(totalNotifs.rows[0].count, 10),
+        last24h: parseInt(notifs24h.rows[0].count, 10),
+        last7d: parseInt(notifs7d.rows[0].count, 10)
+      },
+      system: {
+        db_size: dbSize,
+        uptime_seconds: Math.floor(uptime),
+        memory_mb: Math.round(mem.rss / 1024 / 1024),
+        node_version: process.version
+      },
+      signups_disabled: DISABLE_SIGNUPS
+    });
+  } catch (err) {
+    console.error('admin stats error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.email, u.created_at, u.last_login_at,
+             COALESCE(d.cnt, 0) AS device_count,
+             COALESCE(n.cnt, 0) AS notification_count
+      FROM users u
+      LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM devices GROUP BY user_id) d ON d.user_id = u.id
+      LEFT JOIN (
+        SELECT de.user_id, COUNT(*) AS cnt
+        FROM notifications n
+        JOIN devices de ON de.id = n.device_id
+        GROUP BY de.user_id
+      ) n ON n.user_id = u.id
+      ORDER BY u.created_at DESC
+      LIMIT 500
+    `);
+    res.json({ users: result.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (id === req.session.userId) {
+      return res.status(400).json({ error: 'You cannot delete your own account here.' });
+    }
+    const result = await pool.query('DELETE FROM users WHERE id = $1', [id]);
+    res.json({ deleted: result.rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/settings', requireAdmin, async (req, res) => {
+  // Note: DISABLE_SIGNUPS is env-driven; this returns the current state only.
+  res.json({ signups_disabled: DISABLE_SIGNUPS });
+});
+
+// ---------------------------------------------------------------
+// Prune
 // ---------------------------------------------------------------
 app.get('/api/prune', async (req, res) => {
   if (CRON_SECRET && req.query.secret !== CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
@@ -686,6 +802,7 @@ app.get('/api/prune', async (req, res) => {
 // ---------------------------------------------------------------
 app.get('/', requireAuth, (req, res) => res.send(renderDashboard(req.session.email || 'user')));
 app.get('/devices', requireAuth, (req, res) => res.send(renderDevicesPage(req.session.email || 'user')));
+app.get('/admin', requireAdmin, (req, res) => res.send(renderAdminPage(req.session.email || 'admin')));
 
 // ===============================================================
 // ICONS
@@ -707,7 +824,11 @@ const ICONS = {
   whatsapp: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>',
   logout: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
   trash: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
-  edit: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+  edit: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+  shield: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  users: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  activity: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+  server: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>'
 };
 
 // ===============================================================
@@ -784,7 +905,9 @@ const NAV_STYLES = `
     color: var(--muted); text-decoration: none; padding: 7px 14px;
     border-radius: 9px; font-size: 0.9em; font-weight: 500;
     transition: background 0.15s, color 0.15s;
+    display: inline-flex; align-items: center; gap: 6px;
   }
+  .nav-link svg { display: block; }
   .nav-link:hover { color: var(--text); background: var(--card); }
   .nav-link.active { color: var(--text); background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .right-info { display: flex; align-items: center; gap: 10px; font-size: 0.85em; color: var(--muted); }
@@ -967,6 +1090,9 @@ function renderAuthPage(mode, error) {
 // ===============================================================
 function navBar(email, active) {
   const cls = (path) => active === path ? 'nav-link active' : 'nav-link';
+  const adminLink = isAdminEmail(email)
+    ? '<a class="' + cls('admin') + '" href="/admin">' + ICONS.shield + ' Admin</a>'
+    : '';
   return `
   <header class="site-header">
     <div class="header-inner">
@@ -974,6 +1100,7 @@ function navBar(email, active) {
       <nav class="nav">
         <a class="${cls('dashboard')}" href="/">Dashboard</a>
         <a class="${cls('devices')}" href="/devices">Devices</a>
+        ${adminLink}
       </nav>
       <div class="right-info">
         <span class="user-email">${escapeHtml(email)}</span>
@@ -1719,6 +1846,194 @@ ${FOOTER_HTML}
 </script>
 </body>
 </html>`;
+}
+
+// ===============================================================
+// ADMIN PAGE
+// ===============================================================
+function renderAdminPage(email) {
+  return `<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — Notification Shelves</title>
+<script>${THEME_BOOTSTRAP}</script>
+<style>
+  ${BASE_STYLES} ${NAV_STYLES} ${FOOTER_STYLES}
+  main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  .page-head { margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .page-head h1 { margin: 0; font-size: 1.6em; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+  .page-head .subtitle { color: var(--muted); font-size: 0.9em; margin-top: 4px; }
+  .admin-badge { font-size: 0.6em; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: white; letter-spacing: 0.5px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow-sm); position: relative; overflow: hidden; }
+  .stat::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .stat-label { color: var(--muted); font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .stat-icon { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+  .stat-icon svg { width: 13px; height: 13px; display: block; }
+  .stat-value { font-size: 1.8em; font-weight: 700; letter-spacing: -0.02em; }
+  .stat-value.small { font-size: 1.1em; }
+  .stat-sub { color: var(--muted); font-size: 0.75em; margin-top: 4px; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 22px 24px; margin-bottom: 20px; box-shadow: var(--shadow-sm); }
+  .card h2 { margin: 0 0 16px 0; font-size: 1.05em; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:last-child td { border-bottom: none; }
+  td.numeric { font-variant-numeric: tabular-nums; }
+  .badge-you { font-size: 0.7em; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); margin-left: 6px; letter-spacing: 0.3px; }
+  .btn-tiny { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 8px; font-size: 0.8em; font-weight: 500; cursor: pointer; font-family: inherit; }
+  .btn-tiny:hover { border-color: var(--danger); color: var(--danger); }
+  .warn-banner { background: color-mix(in srgb, var(--warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); color: var(--warning); padding: 12px 16px; border-radius: 10px; font-size: 0.88em; margin-bottom: 16px; }
+
+  @media (max-width: 800px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+${navBar(email, 'admin')}
+<main>
+  <div class="page-head">
+    <div>
+      <h1>Admin Dashboard <span class="admin-badge">ADMIN</span></h1>
+      <div class="subtitle">System overview, users, devices, and notifications</div>
+    </div>
+    <button class="export-btn" id="refresh-btn" style="background:transparent;border:1px solid var(--border);color:var(--text);border-radius:11px;padding:9px 14px;cursor:pointer;font-weight:600;font-size:0.88em;font-family:inherit;display:inline-flex;align-items:center;gap:6px;">${ICONS.refresh} Refresh</button>
+  </div>
+
+  ${DISABLE_SIGNUPS ? '<div class="warn-banner">Signups are currently disabled (DISABLE_SIGNUPS=true).</div>' : ''}
+
+  <div class="stats">
+    <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.users}</span> Total users</div><div class="stat-value" id="s-users">–</div><div class="stat-sub" id="s-users-sub"></div></div>
+    <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.activity}</span> Active (7d)</div><div class="stat-value" id="s-active">–</div><div class="stat-sub">logged in within 7 days</div></div>
+    <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.smartphone}</span> Devices</div><div class="stat-value" id="s-devices">–</div><div class="stat-sub" id="s-devices-sub"></div></div>
+    <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.bell}</span> Notifications</div><div class="stat-value" id="s-notifs">–</div><div class="stat-sub" id="s-notifs-sub"></div></div>
+    <div class="stat"><div class="stat-label"><span class="stat-icon">${ICONS.server}</span> System</div><div class="stat-value small" id="s-system">–</div><div class="stat-sub" id="s-system-sub"></div></div>
+  </div>
+
+  <div class="card">
+    <h2>${ICONS.users} Users</h2>
+    <div id="users-wrap"><p style="color:var(--muted);">Loading…</p></div>
+  </div>
+</main>
+${FOOTER_HTML}
+<div class="toast" id="toast"></div>
+
+<script>
+  ${THEME_TOGGLE_SCRIPT} setupThemeToggle();
+
+  var toast = document.getElementById('toast');
+  var toastTimer = null;
+  function showToast(msg, isError) {
+    toast.textContent = msg;
+    toast.className = 'toast show' + (isError ? ' error' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() { toast.className = 'toast' + (isError ? ' error' : ''); }, 2200);
+  }
+  function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('en-GB', { timeZone:'Africa/Nairobi', year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }) + ' EAT';
+  }
+  function fmtUptime(sec) {
+    var d = Math.floor(sec / 86400);
+    var h = Math.floor((sec % 86400) / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    if (d) return d + 'd ' + h + 'h';
+    if (h) return h + 'h ' + m + 'm';
+    return m + 'm';
+  }
+
+  async function loadStats() {
+    try {
+      var r = await fetch('/api/admin/stats');
+      if (r.status === 403) { document.body.innerHTML = '<main style="padding:40px;text-align:center;"><h1>403 Forbidden</h1></main>'; return; }
+      var d = await r.json();
+      if (!r.ok) { showToast(d.error || 'Failed to load stats', true); return; }
+
+      document.getElementById('s-users').textContent = d.users.total;
+      document.getElementById('s-users-sub').textContent = d.users.today + ' today · ' + d.users.last7 + ' this week';
+      document.getElementById('s-active').textContent = d.users.active7;
+      document.getElementById('s-devices').textContent = d.devices.total;
+      document.getElementById('s-devices-sub').textContent = d.devices.online + ' online now';
+      document.getElementById('s-notifs').textContent = d.notifications.total;
+      document.getElementById('s-notifs-sub').textContent = d.notifications.last24h + ' in 24h · ' + d.notifications.last7d + ' in 7d';
+      document.getElementById('s-system').textContent = d.system.db_size;
+      document.getElementById('s-system-sub').textContent = 'Uptime ' + fmtUptime(d.system.uptime_seconds) + ' · ' + d.system.memory_mb + ' MB RAM · Node ' + d.system.node_version;
+    } catch (e) {
+      console.error(e); showToast('Load failed', true);
+    }
+  }
+
+  async function loadUsers() {
+    try {
+      var r = await fetch('/api/admin/users');
+      var d = await r.json();
+      if (!r.ok) { document.getElementById('users-wrap').innerHTML = '<p style="color:var(--danger);">' + (d.error || 'Failed') + '</p>'; return; }
+
+      if (!d.users.length) {
+        document.getElementById('users-wrap').innerHTML = '<p style="color:var(--muted);">No users yet.</p>';
+        return;
+      }
+
+      var html = '<div style="overflow-x:auto;"><table><thead><tr>' +
+        '<th>Email</th>' +
+        '<th class="hide-sm">Joined</th>' +
+        '<th class="hide-sm">Last login</th>' +
+        '<th>Devices</th>' +
+        '<th>Notifications</th>' +
+        '<th></th>' +
+        '</tr></thead><tbody>';
+
+      d.users.forEach(function(u) {
+        var isYou = u.id === ${JSON.stringify(req_session_placeholder())};
+        html += '<tr>' +
+          '<td>' + escapeHtml(u.email) + (isYou ? '<span class="badge-you">YOU</span>' : '') + '</td>' +
+          '<td class="hide-sm numeric">' + fmtDate(u.created_at) + '</td>' +
+          '<td class="hide-sm numeric">' + fmtDate(u.last_login_at) + '</td>' +
+          '<td class="numeric">' + u.device_count + '</td>' +
+          '<td class="numeric">' + u.notification_count + '</td>' +
+          '<td>' + (isYou ? '' : '<button class="btn-tiny" data-del-user="' + u.id + '" data-email="' + escapeHtml(u.email) + '">Delete</button>') + '</td>' +
+        '</tr>';
+      });
+      html += '</tbody></table></div>';
+      document.getElementById('users-wrap').innerHTML = html;
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  document.body.addEventListener('click', async function(ev) {
+    var btn = ev.target.closest('button[data-del-user]');
+    if (!btn) return;
+    var id = btn.getAttribute('data-del-user');
+    var emailAddr = btn.getAttribute('data-email');
+    if (!confirm('Delete user "' + emailAddr + '"? This will also delete all their devices and notifications. This cannot be undone.')) return;
+    var r = await fetch('/api/admin/users/' + id, { method: 'DELETE' });
+    var d = await r.json();
+    if (!r.ok) { showToast(d.error || 'Delete failed', true); return; }
+    showToast('User deleted');
+    loadStats();
+    loadUsers();
+  });
+
+  document.getElementById('refresh-btn').addEventListener('click', function() { loadStats(); loadUsers(); });
+
+  loadStats();
+  loadUsers();
+  setInterval(loadStats, 30000);
+</script>
+</body>
+</html>`;
+}
+
+// Helper placeholder — replaced at render time with the current user's id
+function req_session_placeholder() {
+  // This is a marker; the actual value is injected per-request by string replacement below.
+  return '0';
 }
 
 // ---------------------------------------------------------------
