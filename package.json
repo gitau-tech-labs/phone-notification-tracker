@@ -1,9 +1,13 @@
 {
   "name": "phone-notification-tracker",
   "version": "1.0.0",
+  "description": "Self-hosted Android notification tracker with multi-device support, real-time dashboard, and authentication.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
