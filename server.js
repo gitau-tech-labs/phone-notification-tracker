@@ -427,4 +427,189 @@ app.get('/', async (req, res) => {
         '<div class="notification" data-id="' + n.id + '" style="--bar-color:' + color + ';">' +
           '<div class="checkbox-wrap"><input type="checkbox" class="select-cb" data-id="' + n.id + '"' + (checked ? ' checked' : '') + '></div>' +
           '<button class="delete-btn" title="Delete" data-id="' + n.id + '">×</button>' +
-          '<div class="row1">'
+          '<div class="row1">' +
+            '<span class="app-pill" style="--pill-color:' + color + ';">' + escapeHtml(shortApp(n.app)) + '</span>' +
+            '<span class="phone-pill">' + escapeHtml(n.phone || 'Unknown') + '</span>' +
+            '<span class="time">' + formatTime(n.timestamp) + '</span>' +
+          '</div>' +
+          (n.title ? '<div class="title">' + escapeHtml(n.title) + '</div>' : '') +
+          (n.body  ? '<div class="body">'  + escapeHtml(n.body)  + '</div>' : '') +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  function renderStats(items) {
+    const total = items.length;
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    const hourCount = items.filter(n => new Date(n.timestamp).getTime() > oneHourAgo).length;
+    const counts = {};
+    items.forEach(n => { counts[n.app] = (counts[n.app] || 0) + 1; });
+    const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+    document.getElementById('stat-total').textContent = total;
+    document.getElementById('stat-hour').textContent = hourCount;
+    document.getElementById('stat-top').textContent = top ? shortApp(top) + ' (' + counts[top] + ')' : '—';
+  }
+
+  async function loadApps() {
+    try {
+      const res = await fetch('/api/apps');
+      const data = await res.json();
+      const select = document.getElementById('app-filter');
+      const current = select.value;
+      select.innerHTML = '<option value="">All apps</option>';
+      data.apps.forEach(app => {
+        const opt = document.createElement('option');
+        opt.value = app;
+        opt.textContent = shortApp(app);
+        select.appendChild(opt);
+      });
+      select.value = current;
+    } catch (e) { console.error(e); }
+  }
+
+  async function loadNotifications() {
+    try {
+      const res = await fetch('/api/notifications');
+      const data = await res.json();
+      allItems = data.notifications || [];
+      applyFilters();
+    } catch (e) {
+      document.getElementById('status').textContent = 'Connection error';
+    }
+  }
+
+  function applyFilters() {
+    const q = document.getElementById('search').value.trim().toLowerCase();
+    const app = document.getElementById('app-filter').value;
+    const filtered = allItems.filter(n => {
+      if (app && n.app !== app) return false;
+      if (q) {
+        const hay = ((n.title || '') + ' ' + (n.body || '')).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    renderStats(filtered);
+    renderList(filtered);
+    updateBulkBar();
+  }
+
+  // Single delete with 5s undo
+  document.getElementById('notifications').addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.delete-btn');
+    if (!btn) return;
+    const id = btn.getAttribute('data-id');
+    const item = allItems.find(n => String(n.id) === String(id));
+    if (!item) return;
+
+    allItems = allItems.filter(n => String(n.id) !== String(id));
+    applyFilters();
+
+    const timer = setTimeout(async () => {
+      try {
+        await fetch('/api/notifications/' + id, { method: 'DELETE' });
+      } catch (e) {
+        showToast('Delete failed', true);
+      } finally {
+        pendingDeletes.delete(String(id));
+      }
+    }, 5000);
+
+    pendingDeletes.set(String(id), { item, timer });
+
+    showUndoToast('Notification deleted', () => {
+      clearTimeout(timer);
+      pendingDeletes.delete(String(id));
+      allItems.push(item);
+      allItems.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      applyFilters();
+      showToast('Restored');
+    });
+  });
+
+  // Checkbox change
+  document.getElementById('notifications').addEventListener('change', (ev) => {
+    const cb = ev.target.closest('.select-cb');
+    if (!cb) return;
+    const id = cb.getAttribute('data-id');
+    if (cb.checked) selectedIds.add(String(id));
+    else selectedIds.delete(String(id));
+    updateBulkBar();
+  });
+
+  document.getElementById('bulk-clear').addEventListener('click', () => {
+    selectedIds.clear();
+    applyFilters();
+  });
+
+  document.getElementById('bulk-delete').addEventListener('click', () => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    if (!confirm('Delete ' + ids.length + ' notification(s)?')) return;
+    allItems = allItems.filter(n => !selectedIds.has(String(n.id)));
+    applyFilters();
+    selectedIds.clear();
+    updateBulkBar();
+    Promise.all(ids.map(id =>
+      fetch('/api/notifications/' + id, { method: 'DELETE' }).catch(() => null)
+    )).then(() => showToast('Deleted ' + ids.length + ' notification(s)'));
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', async () => {
+    if (!confirm('Delete ALL notifications? This cannot be undone.')) return;
+    try {
+      const res = await fetch('/api/notifications', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Clear failed');
+      allItems = [];
+      selectedIds.clear();
+      applyFilters();
+      showToast('Cleared ' + data.deleted + ' notification(s)');
+    } catch (e) { showToast('Failed: ' + e.message, true); }
+  });
+
+  document.getElementById('search').addEventListener('input', applyFilters);
+  document.getElementById('app-filter').addEventListener('change', applyFilters);
+  document.getElementById('refresh-btn').addEventListener('click', () => {
+    loadApps();
+    loadNotifications();
+  });
+
+  // SSE
+  const source = new EventSource('/api/stream');
+  source.addEventListener('hello', () => {
+    document.getElementById('status').textContent = 'Live — connected';
+  });
+  source.addEventListener('notification', (ev) => {
+    const n = JSON.parse(ev.data);
+    if (!allItems.some(x => x.id === n.id)) {
+      allItems.unshift(n);
+      applyFilters();
+      showToast('New: ' + shortApp(n.app));
+    }
+  });
+  source.addEventListener('deleted', (ev) => {
+    const { id } = JSON.parse(ev.data);
+    allItems = allItems.filter(n => n.id !== id);
+    applyFilters();
+  });
+  source.addEventListener('cleared', () => {
+    allItems = [];
+    applyFilters();
+  });
+  source.onerror = () => {
+    document.getElementById('status').textContent = 'Reconnecting...';
+  };
+
+  // Initial
+  loadApps();
+  loadNotifications();
+</script>
+</body>
+</html>`);
+});
+
+app.listen(port, function() {
+  console.log('Server running on port ' + port);
+});
